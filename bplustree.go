@@ -2,6 +2,7 @@ package bplustree
 
 import (
 	"errors"
+
 )
 
 // Tentative errors. Will add more.
@@ -61,14 +62,21 @@ type BplusTreeKey struct {
 	key interface{}
 }
 
+// Interface to be defined by the elem struct to declare how to get to the key in an elem.
+type BplusTreeElemInterface interface {
+	GetKey() BplusTreeKey
+}
+
 // user-defined data/content of the node. Contains the key
 // at the beginning and data follows
-// 'key' is the key corresponding to this element.
+// 'defines' the BplusTreeElemInterface which needs to define a function to get
+// to the key
 // 'value' is the value corresponding to this element.
 type BplusTreeElem struct {
-	key BplusTreeKey
+	BplusTreeElemInterface
 	value interface{}
 }
+
 
 // The 'node' of the bplus tree. Each node is represented by the following data.'
 // 'children' is the list of children that this node has.
@@ -117,8 +125,9 @@ type BplusTreeKeyEvaluator interface {
 // ss BplusTreeSearchSpecifier := {'foo', Both, 10, nil}
 // will search for 'foo' and return 10 keys total, 5 to the Left of 'foo' and 5 to the right of 'foo'.
 // ss BplusTreeSearchSpecifier := {'foo', Both, 10, MyEvalFunc}
-// will search for 'foo' and return maximum of 10 keys total, 5 to the Left of 'foo' and 5 to the right of 'foo' as long as each of those keys when evaluated using the 'evaluator' returns 'true'.
-
+// will search for 'foo' and return maximum of 10 keys total, 5 to the Left
+// of 'foo' and 5 to the right of 'foo' as long as each of those keys when
+// evaluated using the 'evaluator' returns 'true'.
 type BplusTreeSearchSpecifier struct {
 	searchKey       *BplusTreeKey
 	direction       BplusTreeSearchDirection
