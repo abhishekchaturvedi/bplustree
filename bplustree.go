@@ -2,49 +2,83 @@ package bplustree
 
 import (
 	"errors"
-
+	"sync"
+	"fmt"
+	// "reflect"
 )
 
 // Tentative errors. Will add more.
 var (
 	ERR_NOT_FOUND = errors.New("key not found")
-	ERR_NOT_DEFINED = errors.New("Interface is not defined")
+	ERR_NOT_INITIALIZED = errors.New("Tree is not initialized")
+	ERR_INVALID_PARAM = errors.New("Invalid configuration parameter")
 )
 
-// // This interface should allow us to:
-// // read/write updates to tree to some backend (file, or KV store)
-// // load the tree from the backend. More details later as things become more clearer.
-// // To begin with it’d just be an in memory implementation because keys are actually
-// // stored in the db itself. Which would mean that on startup, the tree has to be populated.
-// type BplusTreeSerializer interface {
-// }
-
-// This is the locker interface. The clients of the library should fill in the implementation for the
-// library to use. The context to the lock/unlock calls should be the key we are operating on.
-// Each of the lock/unlock calls are going to be used for Insert/Delete/Lookup operations on the
-// Tree.
+// This is the locker interface. The clients of the library should fill in the
+// implementation for the library to use. The context to the lock/unlock calls
+// should be the set of key we are operating on. The set of keys are separated
+// in keys for which read lock is required vs those for which write lock is required.
+// Each of the lock/unlock calls are going to be used for Insert/Delete/Lookup
+// operations on the Tree.
 type BplusTreeLocker interface {
-	Lock(key* BplusTreeKey)
-	Unlock(key *BplusTreeKey)
+	Lock(rkey []BplusTreeKey, wkey []BplusTreeKey)
+	Unlock(rkey []BplusTreeKey, wkey []BplusTreeKey)
 }
 
-// Comparator for the keys. Returns -1, 0, 1 for less than, equal to and greater
-// than respectively.
-type BplusTreeKeyComparer interface {
-	Comparator(k1 *BplusTreeKey, k2 *BplusTreeKey) int
+// A default locker implementation using sync.RWMutex.
+type BplusTreeDefaultLock struct {
+	mux sync.RWMutex
+}
+func (lck *BplusTreeDefaultLock) Lock (rkey []BplusTreeKey, wkey []BplusTreeKey) {
+	lck.mux.Lock()
+}
+func (lck *BplusTreeDefaultLock) Unlock (rkey []BplusTreeKey, wkey []BplusTreeKey) {
+	lck.mux.Unlock()
+}
+
+
+// The DB Manager interface needs to be implemented by the user if they want
+// this BplusTree library to have a persistent backend to store/load keys from.
+// 'Loader' is a function that should yield all key,value pairs iteratively for
+// so that the BplusTree could be loaded with the key/values in the db when the
+// BplusTree is instantiated.
+// The typical usage of the loader will look like:
+// for k, v := range dbMgr.Loader() {
+//     // do something with the k,v, for example insert key to the bplustree
+// }
+// 'Insert' is the fucntion that will be called when a key is inserted to the tree.
+// 'Delete' is the function that will be called when a key is deleted from the tree.
+type BplusTreeDBMgr interface {
+	Loader() (k BplusTreeKey, v BplusTreeElem)
+	Insert(k []BplusTreeKey, v []BplusTreeElem) error
+	Delete(k []BplusTreeKey) error
+}
+
+// The Memory Manager interface needs to be implemented by the user if they want
+// this BplusTree library to use user provided interface for allocation. The memory
+// manager could have it's own internal policy on how much to cache etc.
+// 'Insert' is the fucntion that will be called when a key is inserted to the tree.
+// 'Delete' is the function that will be called when a key is deleted from the tree.
+type BplusTreeMemMgr interface {
+	Insert(k []BplusTreeKey, v []BplusTreeElem) error
+	Delete(k []BplusTreeKey) error
 }
 
 // The BplusTreeCtx struct defines the optional and necessary user-defined functions
 // which will be used for certain operations.
-// 'locker' is the optional interface for user-defined lock/unlock fuctions.
-// 'serializer' is the optional interface to define how to serialize/deserialize the blustree.
-// 'comparer' is the interface to define the key comparator. This interface is required.
+// 'lockMgr' is the optional interface for user-defined lock/unlock fuctions.
+// 'dbMgr' is the optional interface to define interaction with the persistence layer.
+//         The details of the interface are defined in BplusTreeDBMgr interface.
+// 'memMgr' is the interface to define the memory manager. Whenever a key/value is
+//         added or removed from the BplusTree the memory needed is requested from
+//         the memory manager. Memory manager can implement any policy that it may
+//         need to keep the caching at the levels needed.
 // 'maxDegree' is the maximum degree of the tree.
 type BplusTreeCtx struct {
-	locker          BplusTreeLocker
-	//serializer      BplusTreeSerializer
-	comparer        BplusTreeKeyComparer
-	maxDegree       int
+	lockMgr          BplusTreeLocker
+	dbMgr            BplusTreeDBMgr
+	memMgr           BplusTreeMemMgr
+	maxDegree        int
 }
 
 // The tree itself. Contains the root and some context information.
@@ -54,27 +88,25 @@ type BplusTreeCtx struct {
 type BplusTree struct {
 	root           *BplusTreeNode
 	context         BplusTreeCtx
+	initialized     bool
 }
 
 // user-defined key to identify the node.
 // 'key' could be an arbitrary type.
-type BplusTreeKey struct {
-	key interface{}
+// Compare function compares the given instance with the specified parameter.
+// Returns -1, 0, 1 for less than, equal to and greater than respectively.
+type BplusTreeKey interface {
+	Compare(key BplusTreeKey) int
 }
 
-// Interface to be defined by the elem struct to declare how to get to the key in an elem.
-type BplusTreeElemInterface interface {
-	GetKey() BplusTreeKey
-}
 
 // user-defined data/content of the node. Contains the key
 // at the beginning and data follows
 // 'defines' the BplusTreeElemInterface which needs to define a function to get
 // to the key
 // 'value' is the value corresponding to this element.
-type BplusTreeElem struct {
-	BplusTreeElemInterface
-	value interface{}
+type BplusTreeElem interface {
+	GetKey() BplusTreeKey
 }
 
 
@@ -135,10 +167,29 @@ type BplusTreeSearchSpecifier struct {
 	evaluator       BplusTreeKeyEvaluator
 }
 
+
+func BplusTreeIsEmptyInterface(x interface{}) bool {
+	return x == nil
+}
+
 // Create an instance of new tree. order and ctx specify the required parameters.
 // Returns pointer to the tree if successful, appropriate error otherwise.
-func NewBplusTree(order int, ctx BplusTreeCtx) (*BplusTree, error) {
-	return nil, nil
+func NewBplusTree(ctx BplusTreeCtx) (*BplusTree, error) {
+	fmt.Printf("Initializing new BplusTree...\n")
+
+	if ctx.maxDegree < 0 {
+		fmt.Printf("Invalid value for degree in the context.")
+		return nil, ERR_INVALID_PARAM
+	}
+
+	bplustree := &BplusTree {root: nil, initialized: true, context: ctx}
+
+	if BplusTreeIsEmptyInterface(ctx.lockMgr) {
+		fmt.Printf("No locker specified. Using default locker using mutex\n")
+		bplustree.context.lockMgr = new(BplusTreeDefaultLock)
+	}
+
+	return bplustree, nil
 }
 func (bpt *BplusTree) Insert (elem BplusTreeElem) error {
 	return nil
