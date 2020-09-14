@@ -2,19 +2,21 @@ package bplustree
 
 import (
 	"errors"
-	"sync"
 	"fmt"
-	"sort"
-	"os"
 	"io"
+	"log"
+	"os"
+	"sort"
+	"sync"
 )
 
 // Tentative errors. Will add more.
 var (
-	ERR_NOT_FOUND = errors.New("key not found")
+	ERR_NOT_FOUND       = errors.New("key not found")
 	ERR_NOT_INITIALIZED = errors.New("Tree is not initialized")
-	ERR_INVALID_PARAM = errors.New("Invalid configuration parameter")
-	ERR_EXISTS = errors.New("Already exists")
+	ERR_INVALID_PARAM   = errors.New("Invalid configuration parameter")
+	ERR_EXISTS          = errors.New("Already exists")
+	ERR_TOO_LARGE       = errors.New("Too many values")
 )
 
 // This is the locker interface. The clients of the library should fill in the
@@ -25,26 +27,32 @@ var (
 // operations on the Tree.
 type BplusTreeLocker interface {
 	Init()
-	Lock(rkey []BplusTreeKey, wkey []BplusTreeKey)
-	Unlock(rkey []BplusTreeKey, wkey []BplusTreeKey)
+	Lock(keys []BplusTreeKey, readonly bool)
+	Unlock(keys []BplusTreeKey, readonly bool)
 }
 
 // A default locker implementation using sync.RWMutex.
 type BplusTreeDefaultLock struct {
 	mux *sync.RWMutex
 }
+
 func (lck *BplusTreeDefaultLock) Init() {
 	lck.mux = &sync.RWMutex{}
 }
-func (lck *BplusTreeDefaultLock) Lock (rkey []BplusTreeKey, wkey []BplusTreeKey) {
-	fmt.Printf("Taking lock.. for %v\n", wkey[0])
-	lck.mux.Lock()
+func (lck *BplusTreeDefaultLock) Lock(keys []BplusTreeKey, readonly bool) {
+	if readonly {
+		lck.mux.RLock()
+	} else {
+		lck.mux.Lock()
+	}
 }
-func (lck *BplusTreeDefaultLock) Unlock (rkey []BplusTreeKey, wkey []BplusTreeKey) {
-	fmt.Printf("Unlocking now.... for %v\n", wkey[0])
-	lck.mux.Unlock()
+func (lck *BplusTreeDefaultLock) Unlock(keys []BplusTreeKey, readonly bool) {
+	if readonly {
+		lck.mux.RUnlock()
+	} else {
+		lck.mux.Unlock()
+	}
 }
-
 
 // The DB Manager interface needs to be implemented by the user if they want
 // this BplusTree library to have a persistent backend to store/load keys from.
@@ -82,10 +90,10 @@ type BplusTreeMemMgr interface {
 //         need to keep the caching at the levels needed.
 // 'maxDegree' is the maximum degree of the tree.
 type BplusTreeCtx struct {
-	lockMgr          BplusTreeLocker
-	dbMgr            BplusTreeDBMgr
-	memMgr           BplusTreeMemMgr
-	maxDegree        int
+	lockMgr   BplusTreeLocker
+	dbMgr     BplusTreeDBMgr
+	memMgr    BplusTreeMemMgr
+	maxDegree int
 }
 
 // The tree itself. Contains the root and some context information.
@@ -93,9 +101,9 @@ type BplusTreeCtx struct {
 // 'context' is the context which defines interfaces used for various aspects as defined by
 // BplusTreeCtx interface.
 type BplusTree struct {
-	root           *BplusTreeNode
-	context         BplusTreeCtx
-	initialized     bool
+	root        *BplusTreeNode
+	context     BplusTreeCtx
+	initialized bool
 }
 
 // user-defined key to identify the node.
@@ -105,7 +113,6 @@ type BplusTree struct {
 type BplusTreeKey interface {
 	Compare(key BplusTreeKey) int
 }
-
 
 // user-defined data/content of the node. Contains the key
 // at the beginning and data follows
@@ -125,25 +132,25 @@ type BplusTreeElems []BplusTreeElem
 // 'prev' is the poitner to the prev node (sibling to the lef).
 // 'isLeaf' whether this node is a leaf or not.
 type BplusTreeNode struct {
-	children	BplusTreeElems
-	next		*BplusTreeNode
-	prev		*BplusTreeNode
-	isLeaf           bool
+	children BplusTreeElems
+	next     *BplusTreeNode
+	prev     *BplusTreeNode
+	isLeaf   bool
 }
 
 type BplusTreeSearchDirection int
 
 const (
 	Exact BplusTreeSearchDirection = 0
-	Left = 1
-	Right = 2
-	Both = 3
+	Left                           = 1
+	Right                          = 2
+	Both                           = 3
 )
 
 // An interface which defines a 'evaluator' function to be used for key evaluation
 // for BplusTree search logic. See more in BplusTreeSearchSpecifier
 type BplusTreeKeyEvaluator interface {
-	evaluator(key *BplusTreeKey) bool
+	evaluator(key BplusTreeKey) bool
 }
 
 // The BplusTreeSearchSpecifier contains user defined policy for how the
@@ -152,7 +159,7 @@ type BplusTreeKeyEvaluator interface {
 // direction specifies the direction of the search. It could be exact, left, right or both.
 // maxElems specifies the maximum number of elements that will be returned by the search
 // matching the search criteria. This argument is ignored when using 'Exact' direction.
-// comparer defines the comparison function to be used to while traversing keys to the left
+// evaluator defines the comparison function to be used to while traversing keys to the left
 // or right of the searchKey. This is arugment is ignored when using 'Exact' direction.
 // For example:
 // ss BplusTreeSearchSpecifier := {'foo', Exact, 10, MyEvalFn}
@@ -164,14 +171,15 @@ type BplusTreeKeyEvaluator interface {
 // ss BplusTreeSearchSpecifier := {'foo', Both, 10, MyEvalFunc}
 // will search for 'foo' and return maximum of 10 keys total, 5 to the Left
 // of 'foo' and 5 to the right of 'foo' as long as each of those keys when
-// evaluated using the 'evaluator' returns 'true'.
+// evaluated using the 'evaluator' returns 'true'. First argument of the 'evaluator'
+// function will always be the input key itself and the second argument will be the
+// key with which it is being compared.
 type BplusTreeSearchSpecifier struct {
-	searchKey       *BplusTreeKey
-	direction       BplusTreeSearchDirection
-	maxElems        int
-	evaluator       BplusTreeKeyEvaluator
+	searchKey BplusTreeKey
+	direction BplusTreeSearchDirection
+	maxElems  int
+	evaluator func(BplusTreeKey, BplusTreeKey) bool
 }
-
 
 // Non instance functions.
 func BplusTreeDefaultAlloc() *BplusTreeNode {
@@ -180,7 +188,6 @@ func BplusTreeDefaultAlloc() *BplusTreeNode {
 func BplusTreeIsEmptyInterface(x interface{}) bool {
 	return x == nil
 }
-
 
 // BplusTreeElems instance functions.
 func (elems BplusTreeElems) find(key BplusTreeKey) (index int) {
@@ -193,21 +200,21 @@ func (elems BplusTreeElems) find(key BplusTreeKey) (index int) {
 
 func (elems BplusTreeElems) insert(elem BplusTreeElem, maxDegree int) (BplusTreeElems, error) {
 	index := elems.find(elem.GetKey())
-	fmt.Printf("found element's insert position at %d, (len: %d)\n", index, len(elems))
+	log.Printf("found element's insert position at %d, (len: %d)\n", index, len(elems))
 	// Insert at the end case.
 	if index >= len(elems) {
-		fmt.Printf("Appending %v at %d\n", elem, index)
+		log.Printf("Appending %v at %d\n", elem, index)
 		elems = append(elems, elem)
 		return elems, nil
 	}
 
 	// If inserting in the middle.
 	// XXX: Will need to use memMgr here.
-	fmt.Printf("Inserting %v at %d, increasing elems to (size: %d, cap: %d)\n", elem, index, len(elems) + 1, maxDegree + 1)
-	newElems := make(BplusTreeElems, len(elems) + 1, maxDegree + 1)
+	log.Printf("Inserting %v at %d, increasing elems to (size: %d, cap: %d)\n", elem, index, len(elems)+1, maxDegree+1)
+	newElems := make(BplusTreeElems, len(elems)+1, maxDegree+1)
 	copy(newElems, elems[:index])
 	newElems[index] = elem
-	copy(newElems[index + 1:], elems[index:])
+	copy(newElems[index+1:], elems[index:])
 	return newElems, nil
 }
 
@@ -223,7 +230,6 @@ func (elems BplusTreeElems) String() string {
 	}
 	return fmt.Sprintf("%v", elemStr)
 }
-
 
 // BplusTreeNode instance functions.
 func (node *BplusTreeNode) insertElement(elem BplusTreeElem, maxDegree int) error {
@@ -262,7 +268,6 @@ func (node *BplusTreeNode) String() string {
 		node, node.children, prevKey, nextKey, node.isLeaf)
 }
 
-
 // BplusTree instance functions.
 func (bpt *BplusTree) BplusTreeNodeInit(
 	node *BplusTreeNode,
@@ -277,15 +282,16 @@ func (bpt *BplusTree) BplusTreeNodeInit(
 	node.prev = prev
 }
 
-func (bpt *BplusTree) insertFinder(key BplusTreeKey) (nodes []*BplusTreeNode, err error) {
-	return bpt.find(key, func (node *BplusTreeNode, index int) (int, error) {
-		index -= 1
-		if index <= 0 {
-			index = 0
-		}
-		return index, nil
+func indexResetter(node *BplusTreeNode, index int) (int, error) {
+	index -= 1
+	if index <= 0 {
+		index = 0
+	}
+	return index, nil
+}
 
-	})
+func (bpt *BplusTree) insertFinder(key BplusTreeKey) (nodes []*BplusTreeNode, err error) {
+	return bpt.find(key, indexResetter)
 }
 
 func (bpt *BplusTree) find(key BplusTreeKey, resetter func(*BplusTreeNode, int) (int, error)) (nodes []*BplusTreeNode, err error) {
@@ -310,7 +316,41 @@ func (bpt *BplusTree) find(key BplusTreeKey, resetter func(*BplusTreeNode, int) 
 
 		index, err = resetter(node, index)
 		if err != nil {
-			fmt.Printf("encountered err: %s\n", err)
+			log.Printf("encountered err: %s\n", err)
+			return
+		}
+		node = cnodes[index].(*BplusTreeNode)
+
+	}
+	return
+}
+
+func (bpt *BplusTree) searchFinder(key BplusTreeKey) (foundNode *BplusTreeNode, err error) {
+	return bpt.searchInternal(key, indexResetter)
+}
+
+func (bpt *BplusTree) searchInternal(key BplusTreeKey, resetter func(*BplusTreeNode, int) (int, error)) (foundNode *BplusTreeNode, err error) {
+	node := bpt.root
+	err = nil
+	foundNode = nil
+	if node == nil {
+		return nil, ERR_NOT_FOUND
+	}
+
+	for node != nil {
+		cnodes := node.children
+		if node.isLeaf {
+			foundNode = node
+			break
+		}
+		index := sort.Search(len(cnodes), func(i int) bool {
+			ret := cnodes[i].GetKey().Compare(key)
+			return ret >= 0 // Every key past this point is >=0
+		})
+
+		index, err = resetter(node, index)
+		if err != nil {
+			log.Printf("encountered err: %s\n", err)
 			return
 		}
 		node = cnodes[index].(*BplusTreeNode)
@@ -335,8 +375,8 @@ func (bpt *BplusTree) rebalance(nodes []*BplusTreeNode) (err error) {
 		// so far becomes the children.
 		bpt.root = parent
 	default:
-		parent = nodes[numNodes - 2]
-		curr = nodes[numNodes - 1]
+		parent = nodes[numNodes-2]
+		curr = nodes[numNodes-1]
 	}
 
 	currChildren := curr.children
@@ -344,7 +384,7 @@ func (bpt *BplusTree) rebalance(nodes []*BplusTreeNode) (err error) {
 
 	// XXX: Use memMgr.
 	next = BplusTreeDefaultAlloc()
-	bpt.BplusTreeNodeInit(next, curr.isLeaf, curr.next, curr, len(currChildren) - midp)
+	bpt.BplusTreeNodeInit(next, curr.isLeaf, curr.next, curr, len(currChildren)-midp)
 	curr.children = currChildren[:midp]
 	copy(next.children, currChildren[midp:])
 	curr.next = next
@@ -366,17 +406,16 @@ func (bpt *BplusTree) checkRebalance(nodes []*BplusTreeNode) (err error) {
 		degree := bpt.context.maxDegree
 
 		if len(node.children) > degree {
-			fmt.Printf("node %v (leaf: %v) has degree (%d) more than allowed, splitting\n",
+			log.Printf("node %v (leaf: %v) has degree (%d) more than allowed, splitting\n",
 				node, node.isLeaf, len(node.children))
 			err = bpt.rebalance(nodes[:i+1])
 		} else {
-			fmt.Printf("node %v (leaf: %v) has degree (%d). Allowed\n",
+			log.Printf("node %v (leaf: %v) has degree (%d). Allowed\n",
 				node, node.isLeaf, len(node.children))
 		}
 	}
 	return
 }
-
 
 func (bpt *BplusTree) WriteTreeLayout(writer io.Writer) {
 	leafIdx := 0
@@ -450,27 +489,32 @@ func (bpt *BplusTree) WriteTree(writer io.Writer, printLayout bool) error {
 	return nil
 }
 
+func getKeysToLock(key BplusTreeKey) []BplusTreeKey {
+	keys := make([]BplusTreeKey, 1)
+	keys[0] = key
+	return keys
+}
+
 //
 // External functions.
 //
 
-
 // Create an instance of new tree. order and ctx specify the required parameters.
 // Returns pointer to the tree if successful, appropriate error otherwise.
 func NewBplusTree(ctx BplusTreeCtx) (*BplusTree, error) {
-	fmt.Printf("Initializing new BplusTree...\n")
+	log.Printf("Initializing new BplusTree...\n")
 
 	if ctx.maxDegree < 0 {
-		fmt.Printf("Invalid value for degree in the context.")
+		log.Printf("Invalid value for degree in the context.")
 		return nil, ERR_INVALID_PARAM
 	}
 
 	// XXX: Use memory mgr to alloc.
 	// XXX: Use dbMgr to load to initialize.
-	bplustree := &BplusTree {root: nil, initialized: true, context: ctx}
+	bplustree := &BplusTree{root: nil, initialized: true, context: ctx}
 
 	if BplusTreeIsEmptyInterface(ctx.lockMgr) {
-		fmt.Printf("No locker specified. Using default locker using mutex\n")
+		log.Printf("No locker specified. Using default locker using mutex\n")
 		bplustree.context.lockMgr = new(BplusTreeDefaultLock)
 		bplustree.context.lockMgr.Init()
 	}
@@ -478,50 +522,49 @@ func NewBplusTree(ctx BplusTreeCtx) (*BplusTree, error) {
 	return bplustree, nil
 }
 
-func (bpt *BplusTree) Insert (elem BplusTreeElem) error {
+func (bpt *BplusTree) Insert(elem BplusTreeElem) error {
 	if !bpt.initialized {
 		return ERR_NOT_INITIALIZED
 	}
 
-	keys := make([]BplusTreeKey, 1)
-	keys[0] = elem.GetKey()
-	bpt.context.lockMgr.Lock(nil, keys)
-	defer bpt.context.lockMgr.Unlock(nil, keys)
+	keys := getKeysToLock(elem.GetKey())
+	bpt.context.lockMgr.Lock(keys, false)
+	defer bpt.context.lockMgr.Unlock(keys, false)
 
-	fmt.Printf("Inserting %v\n", elem)
+	log.Printf("Inserting %v\n", elem)
 
 	if bpt.root == nil {
 		newnode := BplusTreeDefaultAlloc()
 		bpt.BplusTreeNodeInit(newnode, true, nil, nil, 0)
 		newnode.children = append(newnode.children, elem)
 		bpt.root = newnode
-		fmt.Printf("Done..... Inserting %v\n", elem)
+		log.Printf("Done..... Inserting %v\n", elem)
 		return nil
 	}
 
 	nodes, err := bpt.insertFinder(elem.GetKey())
 	if err != nil {
-		fmt.Printf("Inserting %v encountered error: %v\n", elem, err)
+		log.Printf("Inserting %v encountered error: %v\n", elem, err)
 		return err
 	}
 
-	fmt.Printf("Accumulated following nodes\n")
-	for _, n := range(nodes) {
-		fmt.Printf("<%v> ", n)
+	log.Printf("Accumulated following nodes\n")
+	for _, n := range nodes {
+		log.Printf("<%v> ", n)
 	}
-	fmt.Printf("\n----------------------------\n")
+	log.Printf("\n----------------------------\n")
 
-	nodeToInsertAt := nodes[len(nodes) - 1]
+	nodeToInsertAt := nodes[len(nodes)-1]
 	err = nodeToInsertAt.insertElement(elem, bpt.context.maxDegree)
 	if err != nil {
-		fmt.Printf("Inserting %v encountered error: %v\n", elem, err)
+		log.Printf("Inserting %v encountered error: %v\n", elem, err)
 		return err
 	}
 
 	err = bpt.checkRebalance(nodes)
-	fmt.Printf("Done..... Inserting %v. Printing...\n", elem)
+	log.Printf("Done..... Inserting %v. Printing...\n", elem)
 	bpt.Print()
-	fmt.Printf("Done..... Printing after insert of %v\n", elem)
+	log.Printf("Done..... Printing after insert of %v\n", elem)
 	return err
 }
 
@@ -529,9 +572,183 @@ func (bpt *BplusTree) Remove(key BplusTreeKey) error {
 	return nil
 }
 
-func (bpt *BplusTree) Search(ss BplusTreeSearchSpecifier) error {
-	return nil
+// Search in the tree. The 'ss' (BplusTreeSearchSpecifier) argument specifies what needs to be
+// searched. Please look at BplusTreeSearchSpecifier for more details on specifying keys to
+// search for.
+func (bpt *BplusTree) Search(ss BplusTreeSearchSpecifier) (result []BplusTreeElem, err error) {
+	keys := getKeysToLock(ss.searchKey)
+	bpt.context.lockMgr.Lock(keys, true)
+	defer bpt.context.lockMgr.Unlock(keys, true)
+
+	if !bpt.initialized {
+		log.Printf("Tree is not initialized\n")
+		return nil, ERR_NOT_INITIALIZED
+	}
+
+	// XXX: Do some more sanity check for the input parameters.
+	// What should be the max limit of # of elements? Using 50 for now.
+	// Better would be to curtail the elems to 50? For now, return error.
+	if ss.maxElems > 50 {
+		log.Printf("maxElems too large\n")
+		return nil, ERR_TOO_LARGE
+	}
+
+	// Get the leaf node where the element should be.
+	node, err := bpt.searchFinder(ss.searchKey)
+	if err != nil {
+		log.Printf("Failed to find key: %v\n", ss.searchKey)
+		return nil, err
+	}
+
+	// Do binary search in the leaf node.
+	index := node.children.find(ss.searchKey)
+	if index >= len(node.children) {
+		// Special case when the key is the first element of a leaf in which
+		// case the tree search will return the previous sibling always.
+		if node.next != nil {
+			node = node.next
+			index = node.children.find(ss.searchKey)
+		} else {
+			log.Printf("Failed to find key: %v\n", ss.searchKey)
+			return nil, ERR_NOT_FOUND
+		}
+	}
+
+	matchingElem := node.children[index]
+
+	if matchingElem == nil {
+		log.Printf("Failed to find key: %v\n", ss.searchKey)
+		return nil, ERR_NOT_FOUND
+	}
+
+	if ss.direction == Exact {
+		result = make([]BplusTreeElem, 1)
+		result[0] = matchingElem
+		return result, nil
+	}
+
+	numElemsLeft := 0
+	numElemsRight := 0
+	switch {
+	case ss.direction == Right:
+		numElemsRight = ss.maxElems
+	case ss.direction == Left:
+		numElemsLeft = ss.maxElems
+	case ss.direction == Both:
+		numElemsLeft = ss.maxElems / 2
+		numElemsRight = ss.maxElems / 2
+	}
+
+	// No evaluator to be used.
+	ignoreEvaluator := false
+	if ss.evaluator == nil {
+		ignoreEvaluator = true
+	}
+	evaluatorLeftExhausted := false
+	evaluatorRightExhausted := false
+
+	result = make([]BplusTreeElem, 1, ss.maxElems)
+	result[0] = matchingElem
+
+	leftStart := 0
+	leftEnd := index
+	leftNode := node
+	leftIndex := leftEnd - 1
+	if index == 0 {
+		leftNode = node.prev
+		if leftNode != nil {
+			leftEnd = len(leftNode.children)
+			leftIndex = len(leftNode.children) - 1
+		}
+	}
+
+	rightStart := index + 1
+	rightNode := node
+	rightIndex := index + 1
+	if index == len(node.children)-1 {
+		rightNode = node.next
+		if rightNode != nil {
+			rightStart = 0
+			rightIndex = 0
+		}
+	}
+
+	if ignoreEvaluator {
+		for numElemsLeft > 0 && leftNode != nil {
+			if leftEnd == -1 {
+				leftEnd = len(leftNode.children)
+			}
+			if (leftEnd - leftStart) < numElemsLeft {
+				result = append(leftNode.children[leftStart:leftEnd], result...)
+				numElemsLeft -= leftEnd - leftStart
+				leftEnd = -1 // We need to reset it.
+				leftNode = leftNode.prev
+			} else {
+				result = append(leftNode.children[leftEnd-numElemsLeft:leftEnd], result...)
+				break
+			}
+		}
+		for numElemsRight > 0 && rightNode != nil {
+			rightEnd := len(rightNode.children)
+			if (rightEnd - rightStart) < numElemsRight {
+				result = append(result, rightNode.children[rightStart:rightEnd]...)
+				numElemsRight -= rightEnd - rightStart
+				rightStart = 0
+				rightNode = rightNode.next
+			} else {
+				result = append(result, rightNode.children[rightStart:rightStart+numElemsRight]...)
+				break
+			}
+		}
+	} else {
+		for numElemsLeft > 0 && leftNode != nil {
+			elemToLeft := leftNode.children[leftIndex]
+			evaluatorLeftExhausted = !ss.evaluator(ss.searchKey, elemToLeft.GetKey())
+			if !evaluatorLeftExhausted {
+				result = append([]BplusTreeElem{elemToLeft}, result...)
+				leftIndex--
+				numElemsLeft--
+				if leftIndex < 0 {
+					leftNode = leftNode.prev
+					if leftNode != nil {
+						leftIndex = len(leftNode.children) - 1
+					}
+				}
+			} else {
+				break
+			}
+
+		}
+		for numElemsRight > 0 && rightNode != nil {
+			elemToRight := rightNode.children[rightIndex]
+			evaluatorRightExhausted = !ss.evaluator(ss.searchKey, elemToRight.GetKey())
+			if !evaluatorRightExhausted {
+				result = append(result, elemToRight)
+				rightIndex++
+				numElemsRight--
+				if rightIndex >= len(rightNode.children) {
+					rightNode = rightNode.next
+					if rightNode != nil {
+						rightIndex = 0
+					}
+				}
+			} else {
+				break
+			}
+		}
+	}
+
+	return
 }
+
+// This function works as a search iterator, where no evaluator is expected in the
+// search specifier. Instead, only a key is specified. Once the caller retrieves the
+// 'result' (a BplusTreeSearchResult instance), they can then call, the GetNext or GetPrev
+// Apis to fetch the next key themselves. The result object contains the lock which the caller
+// needs to use while traversing.
+// func (bpt *BplusTree) SearchIterator(ss BplusTreeSearchSpecifier) (result BplusTreeSearchResult, err error) {
+
+// }
 
 func (bpt *BplusTree) Print() error {
 	return bpt.WriteTree(os.Stdout, true)
