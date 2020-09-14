@@ -288,7 +288,7 @@ func (bpt *BplusTree) insertFinder(key BplusTreeKey) (nodes []*BplusTreeNode, er
 	})
 }
 
-func (bpt *BplusTree) find(key BplusTreeKey, finder func(*BplusTreeNode, int) (int, error)) (nodes []*BplusTreeNode, err error) {
+func (bpt *BplusTree) find(key BplusTreeKey, resetter func(*BplusTreeNode, int) (int, error)) (nodes []*BplusTreeNode, err error) {
 	nodes = make([]*BplusTreeNode, 0) // We don't know the capacity.
 	node := bpt.root
 	if node == nil {
@@ -308,7 +308,7 @@ func (bpt *BplusTree) find(key BplusTreeKey, finder func(*BplusTreeNode, int) (i
 			return ret >= 0 // Every key past this point is >=0
 		})
 
-		index, err = finder(node, index)
+		index, err = resetter(node, index)
 		if err != nil {
 			fmt.Printf("encountered err: %s\n", err)
 			return
@@ -364,10 +364,7 @@ func (bpt *BplusTree) checkRebalance(nodes []*BplusTreeNode) (err error) {
 	for i := len(nodes) - 1; i >= 0; i-- {
 		node := nodes[i]
 		degree := bpt.context.maxDegree
-		// // Leaf nodes are allowed 1 degree more.
-		// if node.isLeaf {
-		// 	degree = bpt.context.maxDegree + 1
-		// }
+
 		if len(node.children) > degree {
 			fmt.Printf("node %v (leaf: %v) has degree (%d) more than allowed, splitting\n",
 				node, node.isLeaf, len(node.children))
