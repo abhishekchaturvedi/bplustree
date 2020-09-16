@@ -9,7 +9,7 @@ import (
 
 type TestingKey int
 
-func (key TestingKey) Compare(key2 BplusTreeKey) int {
+func (key TestingKey) Compare(key2 Key) int {
 	k2 := key2.(TestingKey)
 	return int(key) - int(k2)
 }
@@ -19,8 +19,8 @@ type TestingElem struct {
 	val int
 }
 
-func (elem *TestingElem) GetKey() BplusTreeKey {
-	return BplusTreeKey(elem.key)
+func (elem *TestingElem) GetKey() Key {
+	return Key(elem.key)
 }
 
 func (elem *TestingElem) String() string {
@@ -35,7 +35,7 @@ var newtree *BplusTree
 var numElems int = 120
 var maxDegree int = numElems / 10
 
-func keyEvaluator(k1 BplusTreeKey, k2 BplusTreeKey) bool {
+func keyEvaluator(k1 Key, k2 Key) bool {
 	result := k1.Compare(k2)
 	if result < 10 && result > -10 {
 		return true
@@ -44,7 +44,7 @@ func keyEvaluator(k1 BplusTreeKey, k2 BplusTreeKey) bool {
 	return false
 }
 func TestInit(t *testing.T) {
-	ctx := BplusTreeCtx{lockMgr: nil, maxDegree: maxDegree}
+	ctx := Context{lockMgr: nil, maxDegree: maxDegree}
 	var err error
 	// Enable line numbers in logging
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
@@ -96,7 +96,7 @@ func TestSearch0(t *testing.T) {
 
 	// case 0. Look for a key which doesn't exist.
 	var testingKey TestingKey = 10000
-	ss := BplusTreeSearchSpecifier{searchKey: testingKey, direction: Exact}
+	ss := SearchSpecifier{searchKey: testingKey, direction: Exact}
 	result, err := newtree.Search(ss)
 	if err == nil {
 		t.Errorf("Expected to not find the key: %v", ss.searchKey)
@@ -112,7 +112,7 @@ func TestSearch0(t *testing.T) {
 func TestSearch1(t *testing.T) {
 	// case 1. Exact search.
 	var testingKey TestingKey = 100
-	ss := BplusTreeSearchSpecifier{searchKey: testingKey, direction: Exact}
+	ss := SearchSpecifier{searchKey: testingKey, direction: Exact}
 	result, err := newtree.Search(ss)
 	if err != nil {
 		t.Errorf("Failed find the key: %v, err: %v", ss.searchKey, err)
@@ -126,7 +126,7 @@ func TestSearch1(t *testing.T) {
 	// case 1.a Exact search. Provide an evaluator and maxElems which
 	// should be ignored.
 	var testingKey1 TestingKey = 100
-	ss = BplusTreeSearchSpecifier{searchKey: testingKey1, direction: Exact,
+	ss = SearchSpecifier{searchKey: testingKey1, direction: Exact,
 		maxElems: 50, evaluator: keyEvaluator}
 	result, err = newtree.Search(ss)
 	if len(result) > 1 {
@@ -146,7 +146,7 @@ func TestSearch1(t *testing.T) {
 func TestSearch2(t *testing.T) {
 	// case 2. maxElems greater than limit.
 	var testingKey TestingKey = 100
-	ss := BplusTreeSearchSpecifier{searchKey: testingKey, direction: Exact,
+	ss := SearchSpecifier{searchKey: testingKey, direction: Exact,
 		maxElems: 100, evaluator: keyEvaluator}
 
 	result, err := newtree.Search(ss)
@@ -163,7 +163,7 @@ func TestSearch2(t *testing.T) {
 func TestSearch3(t *testing.T) {
 	// case 3. maxElems = 10, in Right direction. nil evaluator
 	var testingKey TestingKey = 100
-	ss := BplusTreeSearchSpecifier{searchKey: testingKey, direction: Right,
+	ss := SearchSpecifier{searchKey: testingKey, direction: Right,
 		maxElems: 10}
 
 	result, err := newtree.Search(ss)
@@ -198,7 +198,7 @@ func TestSearch3(t *testing.T) {
 func TestSearch4(t *testing.T) {
 	// case 4. maxElems = 10, in Left direction.
 	var testingKey TestingKey = 100
-	ss := BplusTreeSearchSpecifier{searchKey: testingKey, direction: Left,
+	ss := SearchSpecifier{searchKey: testingKey, direction: Left,
 		maxElems: 10}
 
 	result, err := newtree.Search(ss)
@@ -233,7 +233,7 @@ func TestSearch4(t *testing.T) {
 func TestSearch5(t *testing.T) {
 	// case 5. maxElems = 10, in both directions.
 	var testingKey TestingKey = 100
-	ss := BplusTreeSearchSpecifier{searchKey: testingKey, direction: Both,
+	ss := SearchSpecifier{searchKey: testingKey, direction: Both,
 		maxElems: 20}
 
 	result, err := newtree.Search(ss)
@@ -273,8 +273,8 @@ func TestSearch6(t *testing.T) {
 	// get 10 elements.
 
 	var testingKey TestingKey = 100
-	ss := BplusTreeSearchSpecifier{searchKey: testingKey, direction: Both,
-		maxElems: 10, evaluator: func(k1 BplusTreeKey, k2 BplusTreeKey) bool {
+	ss := SearchSpecifier{searchKey: testingKey, direction: Both,
+		maxElems: 10, evaluator: func(k1 Key, k2 Key) bool {
 			result := k1.Compare(k2)
 			if result < 10 && result > -10 {
 				return true
@@ -321,8 +321,8 @@ func TestSearch7(t *testing.T) {
 	// get less than 10 elements.
 
 	var testingKey TestingKey = 100
-	ss := BplusTreeSearchSpecifier{searchKey: testingKey, direction: Both,
-		maxElems: 10, evaluator: func(k1 BplusTreeKey, k2 BplusTreeKey) bool {
+	ss := SearchSpecifier{searchKey: testingKey, direction: Both,
+		maxElems: 10, evaluator: func(k1 Key, k2 Key) bool {
 			result := k1.Compare(k2)
 			if result < 3 && result > -3 {
 				return true
