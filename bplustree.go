@@ -141,6 +141,14 @@ type treeNode struct {
 	isLeaf   bool
 }
 
+// treeOpType - tree operation type. Used internally.
+type treeOpType int
+
+const (
+	treeOpInsert treeOpType = 0
+	treeOpSearch            = 1
+)
+
 // SearchDirection - This type defines the direction of the search. Please see
 // SearchSpecifier for more details
 type SearchDirection int
@@ -335,10 +343,21 @@ func (bpt *BplusTree) treeNodeInit(
 	node.prev = prev
 }
 
-// indexResetter - decrements the index and resets if needed.
+// indexResetter - decrements the index and resets if needed. Note that
+// when we are looking for a key to 'insert' another key, we need to
+// always return the previous key. However, when we are looking for
+//'search' operation, we are interested in the exact key and hence we
+// don't need to decrement the index in that case.
 // Returns the new index
-func indexResetter(index int) int {
-	index--
+func indexResetter(index int, op treeOpType, exactMatch bool) int {
+	switch op {
+	case treeOpInsert:
+		index--
+	case treeOpSearch:
+		if !exactMatch {
+			index--
+		}
+	}
 	if index <= 0 {
 		index = 0
 	}
@@ -350,70 +369,51 @@ func indexResetter(index int) int {
 // Retuns the list of nodes which are encoutered on the path to the leaf node which is
 // smaller in order to the specified key.
 func (bpt *BplusTree) insertFinder(key Key) (nodes []*treeNode, err error) {
-	return bpt.find(key, indexResetter)
+	return bpt.find(key, treeOpInsert, indexResetter)
 }
 
 // find - find a given key in the BplusTree. The function gathers the list of treeNodes
 // found in the path to the leaf node which is equal or lesser than the provided key.
 // Returns the list of nodes gathered on the path, and error if any.
-func (bpt *BplusTree) find(key Key, resetter func(int) int) (nodes []*treeNode, err error) {
+func (bpt *BplusTree) find(key Key, op treeOpType, resetter func(int, treeOpType, bool) int) (nodes []*treeNode, err error) {
 	nodes = make([]*treeNode, 0) // We don't know the capacity.
 	node := bpt.root
+	err = nil
 	if node == nil {
 		return nil, ErrNotFound
 	}
 
 	for node != nil {
-		nodes = append(nodes, node)
 		if node.isLeaf {
+			nodes = append(nodes, node)
 			break
+		}
+		// Only accumulate nodes if this is find for 'insert'. For search, we are only
+		// interested in the leaf node.
+		if op == treeOpInsert {
+			nodes = append(nodes, node)
 		}
 
 		cnodes := node.children
-
+		exactMatch := false
 		index := sort.Search(len(cnodes), func(i int) bool {
 			ret := cnodes[i].GetKey().Compare(key)
+			if ret == 0 {
+				exactMatch = true
+			}
 			return ret >= 0 // Every key past this point is >=0
 		})
 
-		index = resetter(index)
+		index = resetter(index, op, exactMatch)
 		node = cnodes[index].(*treeNode)
-
 	}
 	return
 }
 
 // searchFinder - This function looks for the specified key and returns the leaf node
 // which contains the key (or the one before)
-func (bpt *BplusTree) searchFinder(key Key) (foundNode *treeNode, err error) {
-	return bpt.searchInternal(key, indexResetter)
-}
-
-// searchInternal - Searches the tree for the specified key.
-func (bpt *BplusTree) searchInternal(key Key, resetter func(int) int) (foundNode *treeNode, err error) {
-	node := bpt.root
-	err = nil
-	foundNode = nil
-	if node == nil {
-		return nil, ErrNotFound
-	}
-
-	for node != nil {
-		cnodes := node.children
-		if node.isLeaf {
-			foundNode = node
-			break
-		}
-		index := sort.Search(len(cnodes), func(i int) bool {
-			ret := cnodes[i].GetKey().Compare(key)
-			return ret >= 0 // Every key past this point is >=0
-		})
-
-		index = resetter(index)
-		node = cnodes[index].(*treeNode)
-
-	}
-	return
+func (bpt *BplusTree) searchFinder(key Key) (nodes []*treeNode, err error) {
+	return bpt.find(key, treeOpSearch, indexResetter)
 }
 
 // rebalance - rebalances the tree once a new node is inserted.
@@ -660,24 +660,23 @@ func (bpt *BplusTree) Search(ss SearchSpecifier) (result []Element, err error) {
 	}
 
 	// Get the leaf node where the element should be.
-	node, err := bpt.searchFinder(ss.searchKey)
+	nodes, err := bpt.searchFinder(ss.searchKey)
 	if err != nil {
 		log.Printf("Failed to find key: %v\n", ss.searchKey)
 		return nil, err
 	}
 
+	if len(nodes) != 1 {
+		panic("unexpected length")
+	}
+
+	node := nodes[0]
+
 	// Do binary search in the leaf node.
 	index := node.children.find(ss.searchKey)
 	if index >= len(node.children) {
-		// Special case when the key is the first element of a leaf in which
-		// case the tree search will return the previous sibling always.
-		if node.next != nil {
-			node = node.next
-			index = node.children.find(ss.searchKey)
-		} else {
-			log.Printf("Failed to find key: %v\n", ss.searchKey)
-			return nil, ErrNotFound
-		}
+		log.Printf("Failed to find key: %v\n", ss.searchKey)
+		return nil, ErrNotFound
 	}
 
 	matchingElem := node.children[index]
@@ -789,38 +788,35 @@ func (bpt *BplusTree) Search(ss SearchSpecifier) (result []Element, err error) {
 		for numElemsLeft > 0 && leftNode != nil {
 			elemToLeft := leftNode.children[leftIndex]
 			evaluatorLeftExhausted = !ss.evaluator(ss.searchKey, elemToLeft.GetKey())
-			if !evaluatorLeftExhausted {
-				result = append([]Element{elemToLeft}, result...)
-				leftIndex--
-				numElemsLeft--
-				if leftIndex < 0 {
-					leftNode = leftNode.prev
-					if leftNode != nil {
-						leftIndex = len(leftNode.children) - 1
-					}
-				}
-			} else {
+			if evaluatorLeftExhausted {
 				break
 			}
-
+			result = append([]Element{elemToLeft}, result...)
+			leftIndex--
+			numElemsLeft--
+			if leftIndex < 0 {
+				leftNode = leftNode.prev
+				if leftNode != nil {
+					leftIndex = len(leftNode.children) - 1
+				}
+			}
 		}
 
 		// Do it for the right side.
 		for numElemsRight > 0 && rightNode != nil {
 			elemToRight := rightNode.children[rightIndex]
 			evaluatorRightExhausted = !ss.evaluator(ss.searchKey, elemToRight.GetKey())
-			if !evaluatorRightExhausted {
-				result = append(result, elemToRight)
-				rightIndex++
-				numElemsRight--
-				if rightIndex >= len(rightNode.children) {
-					rightNode = rightNode.next
-					if rightNode != nil {
-						rightIndex = 0
-					}
-				}
-			} else {
+			if evaluatorRightExhausted {
 				break
+			}
+			result = append(result, elemToRight)
+			rightIndex++
+			numElemsRight--
+			if rightIndex >= len(rightNode.children) {
+				rightNode = rightNode.next
+				if rightNode != nil {
+					rightIndex = 0
+				}
 			}
 		}
 	}
