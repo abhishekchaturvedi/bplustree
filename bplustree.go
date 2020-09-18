@@ -147,6 +147,7 @@ type treeOpType int
 const (
 	treeOpInsert treeOpType = 0
 	treeOpSearch            = 1
+	treeOpRemove            = 2
 )
 
 // SearchDirection - This type defines the direction of the search. Please see
@@ -229,9 +230,12 @@ func getKeysToLock(key Key) []Key {
 // find - Find the specified key in the elements slice.
 // Returns the index of element with either the matching key or the key which
 // is before the key (in sort oder) if the matching key isn't found.
-func (elems Elements) find(key Key) (index int) {
+func (elems Elements) find(key Key) (index int, exactMatch bool) {
 	index = sort.Search(len(elems), func(i int) bool {
 		ret := elems[i].GetKey().Compare(key)
+		if ret == 0 {
+			exactMatch = true
+		}
 		return ret >= 0
 	})
 	return
@@ -240,7 +244,7 @@ func (elems Elements) find(key Key) (index int) {
 // insert - Inserts an element to the Elements array in order.
 // Returns the updated Elements slice.
 func (elems Elements) insert(elem Element, maxDegree int) (Elements, error) {
-	index := elems.find(elem.GetKey())
+	index, _ := elems.find(elem.GetKey())
 	log.Printf("found element's insert position at %d, (len: %d)\n",
 		index, len(elems))
 	// Insert at the end case.
@@ -259,6 +263,23 @@ func (elems Elements) insert(elem Element, maxDegree int) (Elements, error) {
 	newElems[index] = elem
 	copy(newElems[index+1:], elems[index:])
 	return newElems, nil
+}
+
+// remove - remove an element from the Elements array
+// Returns the updated elements slice or error if any
+func (elems Elements) remove(key Key, maxDegree int) (Elements, error) {
+	index, exactMatch := elems.find(key)
+	if !exactMatch {
+		return elems, ErrNotFound
+	}
+
+	if index >= len(elems) {
+		fmt.Printf("Found element at index: %d in array of len: %d", index, len(elems))
+		panic("can't have index more than number of elements")
+	}
+
+	elems = append(elems[:index], elems[index+1:]...)
+	return elems, nil
 }
 
 // String - string representation of the 'Elements'
@@ -288,6 +309,17 @@ func (node *treeNode) insertElement(elem Element, maxDegree int) error {
 		return err
 	}
 
+	node.children = children
+	return nil
+}
+
+// removeElement - remove an element from the Elements of given treeNode
+// Returns appropriate error if remove fails.
+func (node *treeNode) removeElement(key Key, maxDegree int) error {
+	children, err := node.children.remove(key, maxDegree)
+	if err != nil {
+		return err
+	}
 	node.children = children
 	return nil
 }
@@ -353,7 +385,7 @@ func indexResetter(index int, op treeOpType, exactMatch bool) int {
 	switch op {
 	case treeOpInsert:
 		index--
-	case treeOpSearch:
+	case treeOpSearch, treeOpRemove:
 		if !exactMatch {
 			index--
 		}
@@ -364,23 +396,20 @@ func indexResetter(index int, op treeOpType, exactMatch bool) int {
 	return index
 }
 
-// insertFinder - Function to find the path of nodes in the BplusTree where the given
-// key needs to be inserted.
-// Retuns the list of nodes which are encoutered on the path to the leaf node which is
-// smaller in order to the specified key.
-func (bpt *BplusTree) insertFinder(key Key) (nodes []*treeNode, err error) {
-	return bpt.find(key, treeOpInsert, indexResetter)
-}
-
 // find - find a given key in the BplusTree. The function gathers the list of treeNodes
 // found in the path to the leaf node which is equal or lesser than the provided key.
 // Returns the list of nodes gathered on the path, and error if any.
-func (bpt *BplusTree) find(key Key, op treeOpType, resetter func(int, treeOpType, bool) int) (nodes []*treeNode, err error) {
+func (bpt *BplusTree) find(key Key,
+	op treeOpType,
+	resetter func(int, treeOpType, bool) int) (nodes []*treeNode, indexes []int, err error) {
 	nodes = make([]*treeNode, 0) // We don't know the capacity.
+	if op == treeOpRemove {
+		indexes = make([]int, 0)
+	}
 	node := bpt.root
 	err = nil
 	if node == nil {
-		return nil, ErrNotFound
+		return nil, nil, ErrNotFound
 	}
 
 	for node != nil {
@@ -388,9 +417,9 @@ func (bpt *BplusTree) find(key Key, op treeOpType, resetter func(int, treeOpType
 			nodes = append(nodes, node)
 			break
 		}
-		// Only accumulate nodes if this is find for 'insert'. For search, we are only
-		// interested in the leaf node.
-		if op == treeOpInsert {
+		// Only accumulate nodes if this is find for 'insert' or 'remove'.
+		// For search, we are only interested in the leaf node.
+		if op == treeOpInsert || op == treeOpRemove {
 			nodes = append(nodes, node)
 		}
 
@@ -405,15 +434,32 @@ func (bpt *BplusTree) find(key Key, op treeOpType, resetter func(int, treeOpType
 		})
 
 		index = resetter(index, op, exactMatch)
+		if op == treeOpRemove {
+			indexes = append(indexes, index)
+		}
 		node = cnodes[index].(*treeNode)
 	}
 	return
 }
 
+// insertFinder - Function to find the path of nodes in the BplusTree where the given
+// key needs to be inserted.
+// Retuns the list of nodes which are encoutered on the path to the leaf node which is
+// smaller in order to the specified key.
+func (bpt *BplusTree) insertFinder(key Key) (nodes []*treeNode, indexes []int, err error) {
+	return bpt.find(key, treeOpInsert, indexResetter)
+}
+
 // searchFinder - This function looks for the specified key and returns the leaf node
-// which contains the key (or the one before)
-func (bpt *BplusTree) searchFinder(key Key) (nodes []*treeNode, err error) {
+// which contains the key
+func (bpt *BplusTree) searchFinder(key Key) (nodes []*treeNode, indexes []int, err error) {
 	return bpt.find(key, treeOpSearch, indexResetter)
+}
+
+// removeFinder - This function looks for the specified key and returns all nodes on the
+// path to the leaf node which contains the key
+func (bpt *BplusTree) removeFinder(key Key) (nodes []*treeNode, indexes []int, err error) {
+	return bpt.find(key, treeOpRemove, indexResetter)
 }
 
 // rebalance - rebalances the tree once a new node is inserted.
@@ -477,44 +523,210 @@ func (bpt *BplusTree) checkRebalance(nodes []*treeNode) (err error) {
 	return
 }
 
+// merge - merge siblings as needed after a node is removed.
+func (bpt *BplusTree) merge(parent *treeNode,
+	siblIndex int,
+	curr *treeNode,
+	sibling *treeNode,
+	direction SearchDirection) error {
+
+	// If merging with right sibling then append right sibling's chilren
+	// to current node, otherwise append current nodes' children to left
+	// sibling.
+	switch {
+	case direction == Right:
+		fmt.Printf("Merging %v and %v\n", curr, sibling)
+		curr.children = append(curr.children, sibling.children...)
+		curr.next = sibling.next
+		// drop the entry of the right node from parent's children.
+		parent.children = append(parent.children[:siblIndex],
+			parent.children[siblIndex+1:]...)
+	case direction == Left:
+		fmt.Printf("Merging %v and %v\n", sibling, curr)
+		sibling.children = append(sibling.children, curr.children...)
+		sibling.next = curr.next
+		// drop the entry of the current node from parent's children.
+		if siblIndex == (len(parent.children) - 2) { // current node is the rightmost node.
+			parent.children = parent.children[:siblIndex+1]
+		} else {
+			parent.children = append(parent.children[:siblIndex+1],
+				parent.children[siblIndex+2:]...)
+		}
+	default: // Merging with parent.
+		fmt.Printf("Merging Parent %v and %v\n", parent, curr)
+		parent.children = curr.children
+		parent.isLeaf = curr.isLeaf
+		return nil
+	}
+
+	return nil
+}
+
+// distribute -- redistribute nodes among siblings for balancing the tree when a node
+// is removed. This function will make the # of children equal (off by 1 max) in the
+// current node and the sibling node.
+func (bpt *BplusTree) distribute(parent *treeNode,
+	siblIndex int,
+	curr *treeNode,
+	sibling *treeNode,
+	direction SearchDirection) error {
+
+	// Distribute the children from sibling to the current node such
+	// that both of them have equal lengths.
+	numChildrenToDistribute := (len(sibling.children) -
+		(len(sibling.children)+len(curr.children))/2)
+	switch {
+	case direction == Right:
+		fmt.Printf("Distributing %d elements from right sibling %v and %v\n",
+			numChildrenToDistribute, sibling, curr)
+		curr.children = append(curr.children, sibling.children[:numChildrenToDistribute]...)
+		sibling.children = sibling.children[numChildrenToDistribute:]
+	case direction == Left:
+		fmt.Printf("Distributing %d elements from left sibling %v and %v\n",
+			numChildrenToDistribute, sibling, curr)
+		nLeft := len(sibling.children)
+		tmpChildren := sibling.children[nLeft-numChildrenToDistribute:]
+		sibling.children = sibling.children[:nLeft-numChildrenToDistribute]
+		curr.children = append(tmpChildren, curr.children...)
+	default:
+		panic("unexpected condition")
+	}
+	return nil
+}
+
+// checkMerge - Check to see if any merging is needed on the nodes traversed
+// through deletion after an element is deleted. Following are the scenarios where
+// we'd need redistributing or merging. If the current node's number of children
+// is less than 1/2 of allowed degree (d), and nLeft and nRight be the # of children
+// that the left and right sibling nodes have, then:
+// nLeft		nRight		Action
+// nil			nil			Merge with parent
+// nil 			<d/2		Merge with right sibling
+// nil          >d/2        Distribute with right sibling
+// <d/2			nil			Merge with left sibling
+// <d/2			<d/2		Merge with sibling which has less children
+// <d/2 		>d/2		Merge with left sibling
+// >d/2 		nil			Distribute with left sibling
+// >d/2			<d/2		Merge with right sibling
+// >d/2			>d/2		Distribute with sibling whichever has less children
+// Returns error if encountered.
+func (bpt *BplusTree) checkMergeOrDistribute(nodes []*treeNode, indexes []int) (err error) {
+	// Traverse in reverse order to address the nodes towards leaves first.
+	// Note the iteration to 1, as nothing to be done for the root node if the degree
+	// drops below d/2
+	for i := len(nodes) - 1; i >= 1; i-- {
+		node := nodes[i]
+		minDegree := bpt.context.maxDegree / 2
+		if len(node.children) >= minDegree {
+			break
+		}
+
+		log.Printf("node %v (leaf: %v) has degree (%d) less than allowed. "+
+			"Needs merging or distributing\n", node, node.isLeaf, len(node.children))
+
+		parent := nodes[i-1]
+		var leftSibl, rightSibl *treeNode = nil, nil
+		var nLeft, nRight int = 0, 0
+		var lIndex, rIndex int = 0, 0
+		if indexes[i-1] != 0 {
+			lIndex = indexes[i-1] - 1
+			leftSibl = parent.children[lIndex].(*treeNode)
+			nLeft = len(leftSibl.children)
+		}
+		if indexes[i-1] < (len(parent.children) - 1) {
+			rIndex = indexes[i-1] + 1
+			rightSibl = parent.children[rIndex].(*treeNode)
+			nRight = len(rightSibl.children)
+		}
+		switch {
+		case nLeft == 0 && nRight == 0:
+			err = bpt.merge(parent, 0, node, nil, Exact)
+		case nLeft == 0 && nRight <= minDegree:
+			err = bpt.merge(parent, rIndex, node, rightSibl, Right)
+		case nLeft == 0 && nRight > minDegree:
+			err = bpt.distribute(parent, rIndex, node, rightSibl, Right)
+		case nLeft <= minDegree && nRight == 0:
+			err = bpt.merge(parent, lIndex, node, leftSibl, Left)
+		case nLeft <= minDegree && nRight <= minDegree:
+			sibl := leftSibl
+			direction := SearchDirection(Left)
+			ind := lIndex
+			if nRight < nLeft {
+				sibl = rightSibl
+				direction = Right
+				ind = rIndex
+			}
+			err = bpt.merge(parent, ind, node, sibl, direction)
+		case nLeft <= minDegree && nRight > minDegree:
+			err = bpt.merge(parent, lIndex, node, leftSibl, Left)
+		case nLeft > minDegree && nRight == 0:
+			err = bpt.distribute(parent, lIndex, node, leftSibl, Left)
+		case nLeft > minDegree && nRight <= minDegree:
+			err = bpt.merge(parent, rIndex, node, rightSibl, Right)
+		case nLeft > minDegree && nRight > minDegree:
+			sibl := leftSibl
+			direction := SearchDirection(Left)
+			ind := lIndex
+			if nRight < nLeft {
+				sibl = rightSibl
+				direction = Right
+				ind = rIndex
+			}
+			err = bpt.distribute(parent, ind, node, sibl, direction)
+		}
+	}
+	return
+}
+
 // writeLayout - Writes the tree layout on the provided writer
 func (bpt *BplusTree) writeLayout(writer io.Writer) {
 	leafIdx := 0
 	nodeIdx := 0
 	levelIdx := 0
 
-	fmt.Fprintf(writer, "Dumping the tree layout.. \n")
+	if !bpt.initialized || bpt.root == nil {
+		return
+	}
+
+	fmt.Fprintf(writer, "Dumping the tree layout.. numChildren: %d\n", len(bpt.root.children))
 	nodeList := bpt.root.children
 	nodeLensList := make([]int, 1)
 	nodeLensList[0] = len(bpt.root.children)
 	numElems := nodeLensList[0]
+	printLevel := true
+	fmt.Fprintf(writer, "LEVEL -- 0    <root: %v>\n", bpt.root)
 	for i := 0; i < numElems; i++ {
+		if printLevel {
+			fmt.Fprintf(writer, "LEVEL -- %d    ", levelIdx+1)
+			printLevel = false
+		}
 		node := nodeList[i]
 		switch elemType := node.(type) {
 		case *treeNode:
 			if elemType.isLeaf {
-				fmt.Fprintf(writer, "<tree-L-node :%d, level: %d, node: %v> ",
-					leafIdx, levelIdx, elemType)
+				fmt.Fprintf(writer, "<tree-L-node :%d, node: %v> ",
+					leafIdx, elemType)
 				leafIdx++
 			} else {
-				fmt.Fprintf(writer, "<tree-I-node :%d, levelIdx: %d, node: %v> ",
-					nodeIdx, levelIdx, elemType)
+				fmt.Fprintf(writer, "<tree-I-node :%d, node: %v> ",
+					nodeIdx, elemType)
 				nodeList = append(nodeList, elemType.children...)
 				nodeLensList = append(nodeLensList, len(elemType.children))
 				numElems += len(elemType.children)
 			}
 		default:
-			fmt.Fprintf(writer, "<elem-node :%d, level: %d, node: %v> ",
-				nodeIdx, levelIdx, elemType)
+			fmt.Fprintf(writer, "<elem-node :%d, node: %v> ",
+				nodeIdx, elemType)
 		}
 		nodeIdx++
 		if nodeIdx >= nodeLensList[levelIdx] {
 			levelIdx++
 			nodeIdx = 0
 			fmt.Fprintf(writer, "\n")
+			printLevel = true
 		}
 	}
-	fmt.Fprintf(writer, "Done dumping the tree layout\n")
+	fmt.Fprintf(writer, "DONE.. dumping the layout\n")
 	fmt.Fprintf(writer, "----------------------------\n")
 }
 
@@ -603,17 +815,11 @@ func (bpt *BplusTree) Insert(elem Element) error {
 		return nil
 	}
 
-	nodes, err := bpt.insertFinder(elem.GetKey())
+	nodes, _, err := bpt.insertFinder(elem.GetKey())
 	if err != nil {
 		log.Printf("Inserting %v encountered error: %v\n", elem, err)
 		return err
 	}
-
-	log.Printf("Accumulated following nodes\n")
-	for _, n := range nodes {
-		log.Printf("<%v> ", n)
-	}
-	log.Printf("\n----------------------------\n")
 
 	nodeToInsertAt := nodes[len(nodes)-1]
 	err = nodeToInsertAt.insertElement(elem, bpt.context.maxDegree)
@@ -632,7 +838,40 @@ func (bpt *BplusTree) Insert(elem Element) error {
 // Remove - Remove an element with the given key from the tree.
 // Returns error if encoutered
 func (bpt *BplusTree) Remove(key Key) error {
-	return nil
+	keys := getKeysToLock(key)
+	bpt.context.lockMgr.Lock(keys, false)
+	defer bpt.context.lockMgr.Unlock(keys, false)
+
+	if !bpt.initialized {
+		log.Printf("Tree not initialized")
+		return ErrNotInitialized
+	}
+
+	nodes, indexes, err := bpt.removeFinder(key)
+	if err != nil {
+		log.Printf("failed to find key %v to remove", key)
+		return err
+	}
+
+	log.Printf("Accumulated following nodes\n")
+	for _, n := range nodes {
+		log.Printf("<%v> ", n)
+	}
+	log.Printf("\n----------------------------\n")
+
+	nodeToRemoveFrom := nodes[len(nodes)-1]
+
+	err = nodeToRemoveFrom.removeElement(key, bpt.context.maxDegree)
+	if err != nil {
+		fmt.Printf("Failed to remove element from the elements list: %v", err)
+		return err
+	}
+
+	err = bpt.checkMergeOrDistribute(nodes, indexes)
+	log.Printf("Done..... Removing %v. Printing...\n", key)
+	bpt.Print()
+	log.Printf("Done..... Printing after remove of %v\n", key)
+	return err
 }
 
 // Search - Search for a given key (or more) in the tree. The 'ss' (SearchSpecifier)
@@ -660,7 +899,7 @@ func (bpt *BplusTree) Search(ss SearchSpecifier) (result []Element, err error) {
 	}
 
 	// Get the leaf node where the element should be.
-	nodes, err := bpt.searchFinder(ss.searchKey)
+	nodes, _, err := bpt.searchFinder(ss.searchKey)
 	if err != nil {
 		log.Printf("Failed to find key: %v\n", ss.searchKey)
 		return nil, err
@@ -673,7 +912,7 @@ func (bpt *BplusTree) Search(ss SearchSpecifier) (result []Element, err error) {
 	node := nodes[0]
 
 	// Do binary search in the leaf node.
-	index := node.children.find(ss.searchKey)
+	index, _ := node.children.find(ss.searchKey)
 	if index >= len(node.children) {
 		log.Printf("Failed to find key: %v\n", ss.searchKey)
 		return nil, ErrNotFound
@@ -835,5 +1074,5 @@ func (bpt *BplusTree) Search(ss SearchSpecifier) (result []Element, err error) {
 
 // Print - Prints the BplusTree on stdout.
 func (bpt *BplusTree) Print() error {
-	return bpt.writeTree(os.Stdout, true)
+	return bpt.writeTree(os.Stdout, false, true)
 }
