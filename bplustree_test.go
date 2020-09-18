@@ -32,8 +32,8 @@ func (key *TestingKey) String() string {
 }
 
 var newtree *BplusTree
-var numElems int = 120
-var maxDegree int = numElems / 10
+var numElems int = 5000
+var maxDegree int = numElems / 100
 
 func keyEvaluator(k1 Key, k2 Key) bool {
 	result := k1.Compare(k2)
@@ -55,14 +55,16 @@ func TestInit(t *testing.T) {
 	}
 }
 
-func InsertRoutine(t *testing.T, elem *TestingElem, errors []error, index int, wg *sync.WaitGroup) {
+func InsertRoutine(t *testing.T,
+	elem *TestingElem,
+	errors []error,
+	index int,
+	wg *sync.WaitGroup) {
 	defer wg.Done()
 	t.Logf("Inserting: %v", elem)
 	err := newtree.Insert(elem)
 	errors[index] = err
-	if err == nil {
-		//newtree.Print()
-	}
+
 	t.Logf("++++++++++++++++++++++++++++++++")
 }
 
@@ -360,4 +362,105 @@ func TestSearch7(t *testing.T) {
 		// and increment by 1.
 		expectedVal++
 	}
+}
+
+func TestRemove1(t *testing.T) {
+	fmt.Println("Starting remove in order tests")
+	for i := 0; i < numElems; i++ {
+		key := TestingKey(i)
+		fmt.Printf("removing key: %v", key)
+		err := newtree.Remove(key)
+		if err != nil {
+			t.Errorf("Failed to remove key: %v got %v", key, err)
+			t.FailNow()
+		}
+	}
+}
+
+func TestRemove2(t *testing.T) {
+	TestInsert(t)
+	fmt.Println("Starting remove in reverse order tests")
+	for i := numElems - 1; i >= 0; i-- {
+		key := TestingKey(i)
+		fmt.Printf("removing key: %v", key)
+		err := newtree.Remove(key)
+		if err != nil {
+			t.Errorf("Failed to remove key: %v got %v", key, err)
+			t.FailNow()
+		}
+	}
+}
+
+func TestRemove3(t *testing.T) {
+	TestInsert(t)
+	fmt.Println("Starting remove in weird order test")
+
+	removed := make(map[int]bool)
+	for i := 0; i < numElems/3; i++ {
+		k1 := i
+		key := TestingKey(k1)
+		fmt.Printf("removing key: %v", key)
+		err := newtree.Remove(key)
+		if err != nil {
+			t.Errorf("Failed to remove key: %v got %v", key, err)
+			t.FailNow()
+		}
+		removed[k1] = true
+
+		k2 := numElems/3 + i
+		key = TestingKey(k2)
+		fmt.Printf("removing key: %v", key)
+		err = newtree.Remove(key)
+		if err != nil {
+			t.Errorf("Failed to remove key: %v got %v", key, err)
+			t.FailNow()
+		}
+		removed[k2] = true
+
+		k3 := numElems*2/3 + i
+		key = TestingKey(k3)
+		fmt.Printf("removing key: %v", key)
+		err = newtree.Remove(key)
+		if err != nil {
+			t.Errorf("Failed to remove key: %v got %v", key, err)
+			t.FailNow()
+		}
+		removed[k3] = true
+	}
+
+	for i := 0; i < numElems; i++ {
+		if !removed[i] {
+			newtree.Remove(TestingKey(i))
+		}
+	}
+}
+
+func RemoveRoutine(t *testing.T, k int, errors []error, index int, wg *sync.WaitGroup) {
+	defer wg.Done()
+	t.Logf("Removing: %v", k)
+	err := newtree.Remove(TestingKey(k))
+	errors[index] = err
+	t.Logf("++++++++++++++++++++++++++++++++")
+}
+
+func TestRemove4(t *testing.T) {
+	TestInsert(t)
+	fmt.Println("Starting remove in parallel test")
+	errors := make([]error, numElems)
+	var wg sync.WaitGroup
+
+	for i := 0; i < numElems; i++ {
+		wg.Add(1)
+		go RemoveRoutine(t, i, errors, i, &wg)
+	}
+
+	wg.Wait()
+	for i := 0; i < numElems; i++ {
+		if errors[i] != nil {
+			t.Errorf("Failed to insert: %d: %v", i, errors[i])
+			t.FailNow()
+		}
+	}
+	t.Logf("\nFinal tree:\n")
+	newtree.Print()
 }
