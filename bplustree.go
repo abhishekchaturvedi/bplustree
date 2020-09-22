@@ -61,10 +61,6 @@ func (lck *defaultLock) Unlock(readSet []Key, writeSet []Key) {
 // 'Load' is a function that should yield all key,value pairs iteratively for
 // so that the BplusTree could be loaded with the key/values in the db when the
 // BplusTree is instantiated.
-// The typical usage of the loader will look like:
-// for k, v := range dbMgr.Loader() {
-//     // do something with the k,v, for example insert key to the bplustree
-// }
 // 'Store' function will be called when a key is inserted to the tree.
 // 'Delete' function will be called when a key is deleted from the tree.
 type DBMgr interface {
