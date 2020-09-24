@@ -29,7 +29,7 @@ var (
 type Locker interface {
 	Init()
 	Lock(readSet []Key, writeSet []Key)
-	Unlock(readSeys []Key, writeSet []Key)
+	Unlock(readSet []Key, writeSet []Key)
 }
 
 // defaultLock - A default locker implementation using sync.RWMutex.
@@ -459,7 +459,8 @@ func (bpt *BplusTree) checkMergeOrDistribute(nodes []*treeNode, indexes []int) {
 	// degree drops below d/2
 	for i := len(nodes) - 1; i >= 1; i-- {
 		node := nodes[i]
-		minDegree := bpt.context.maxDegree / 2
+		maxDegree := bpt.context.maxDegree
+		minDegree := maxDegree/2 + 1
 		if len(node.children) >= minDegree {
 			break
 		}
@@ -481,6 +482,12 @@ func (bpt *BplusTree) checkMergeOrDistribute(nodes []*treeNode, indexes []int) {
 			rightSibl = parent.children[rIndex].(*treeNode)
 			nRight = len(rightSibl.children)
 		}
+		log.Printf("i: %d, indexes: %v, parent: %v\n",
+			i, indexes, parent)
+		log.Printf("lIndex: %d, nLeft: %d, leftSibl: %v\n",
+			lIndex, nLeft, leftSibl)
+		log.Printf("rIndex: %d, nRight: %d, rightSibl: %v\n",
+			rIndex, nRight, rightSibl)
 		switch {
 		case nLeft == 0 && nRight == 0:
 			bpt.merge(parent, node, nil, 0, Exact)
@@ -536,6 +543,7 @@ func (bpt *BplusTree) writeLayout(writer io.Writer) {
 	nodeLensList := make([]int, 1)
 	nodeLensList[0] = len(bpt.root.children)
 	numElems := nodeLensList[0]
+	numNodesAtLevel := 0
 	printLevel := true
 	fmt.Fprintf(writer, "LEVEL -- 0    <root: %v>\n", bpt.root)
 	for i := 0; i < numElems; i++ {
@@ -554,8 +562,8 @@ func (bpt *BplusTree) writeLayout(writer io.Writer) {
 				fmt.Fprintf(writer, "<tree-I-node :%d, node: %v> ",
 					nodeIdx, elemType)
 				nodeList = append(nodeList, elemType.children...)
-				nodeLensList = append(nodeLensList, len(elemType.children))
 				numElems += len(elemType.children)
+				numNodesAtLevel += len(elemType.children)
 			}
 		default:
 			fmt.Fprintf(writer, "<elem-node :%d, node: %v> ",
@@ -563,8 +571,10 @@ func (bpt *BplusTree) writeLayout(writer io.Writer) {
 		}
 		nodeIdx++
 		if nodeIdx >= nodeLensList[levelIdx] {
+			nodeLensList = append(nodeLensList, numNodesAtLevel)
 			levelIdx++
 			nodeIdx = 0
+			numNodesAtLevel = 0
 			fmt.Fprintf(writer, "\n")
 			printLevel = true
 		}
@@ -615,7 +625,7 @@ func (bpt *BplusTree) writeTree(writer io.Writer, printLayout bool) {
 // required parameters.
 // Returns pointer to the tree if successful, appropriate error otherwise.
 func NewBplusTree(ctx Context) (*BplusTree, error) {
-	if ctx.maxDegree < 0 {
+	if ctx.maxDegree < 3 {
 		log.Printf("Invalid value for degree in the context.")
 		return nil, ErrInvalidParam
 	}
@@ -753,8 +763,8 @@ func (bpt *BplusTree) Search(ss SearchSpecifier) ([]Element, error) {
 	node := nodes[0]
 
 	// Do binary search in the leaf node.
-	index, _ := node.children.find(ss.searchKey)
-	if index >= len(node.children) {
+	index, exactMatch := node.children.find(ss.searchKey)
+	if index >= len(node.children) || exactMatch != true {
 		log.Printf("Failed to find key: %v\n", ss.searchKey)
 		return nil, ErrNotFound
 	}
