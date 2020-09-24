@@ -3,6 +3,7 @@ package bplustree
 import (
 	"fmt"
 	"log"
+	"math/rand"
 	"sync"
 	"testing"
 )
@@ -82,9 +83,13 @@ func (key *TestingKeyStr) String() string {
 	return fmt.Sprintf("key: %s", str)
 }
 
-var newtree *BplusTree
-var numElems int = 100000
-var maxDegree int = numElems / 100
+var numElemChoices = []int{10, 500, 10000}
+var degreeChoices = []int{3, 50, 100}
+
+func getNumElemsAndDegreeRandomly() (int, int) {
+	idx := rand.Intn(len(numElemChoices))
+	return numElemChoices[idx], degreeChoices[idx]
+}
 
 func keyEvaluator(k1 Key, k2 Key) bool {
 	result := k1.Compare(k2)
@@ -94,23 +99,20 @@ func keyEvaluator(k1 Key, k2 Key) bool {
 
 	return false
 }
-func TestInit(t *testing.T) {
+func initTree(t *testing.T, maxDegree int) (*BplusTree, error) {
 	ctx := Context{lockMgr: nil, maxDegree: maxDegree}
-	var err error
 	// Enable line numbers in logging
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
-	newtree, err = NewBplusTree(ctx)
+	newtree, err := NewBplusTree(ctx)
 	if err != nil {
 		t.Errorf("Failed to create new bplustree: %v", err)
 		t.FailNow()
 	}
+	return newtree, err
 }
 
-func InsertRoutine(t *testing.T,
-	elem *TestingElem,
-	errors []error,
-	index int,
-	wg *sync.WaitGroup) {
+func insertRoutine(t *testing.T, newtree *BplusTree, elem *TestingElem,
+	errors []error, index int, wg *sync.WaitGroup) {
 	defer wg.Done()
 	t.Logf("Inserting: %v", elem)
 	err := newtree.Insert(elem)
@@ -119,8 +121,7 @@ func InsertRoutine(t *testing.T,
 	t.Logf("++++++++++++++++++++++++++++++++")
 }
 
-func TestInsert(t *testing.T) {
-	t.Log("Starting insert test..")
+func insertInt(t *testing.T, newtree *BplusTree, numElems int) {
 	elems := make([]TestingElem, numElems)
 	errors := make([]error, numElems)
 	var wg sync.WaitGroup
@@ -130,7 +131,7 @@ func TestInsert(t *testing.T) {
 		elem.key = TestingKey(i)
 		elem.val = i + 10
 		wg.Add(1)
-		go InsertRoutine(t, elem, errors, i, &wg)
+		go insertRoutine(t, newtree, elem, errors, i, &wg)
 	}
 
 	wg.Wait()
@@ -144,11 +145,15 @@ func TestInsert(t *testing.T) {
 	newtree.Print()
 }
 
-func TestSearch0(t *testing.T) {
-	t.Log("Starting search tests..")
+func initAndInsert(t *testing.T, maxDegree int, numElems int) (*BplusTree, error) {
+	newtree, err := initTree(t, maxDegree)
+	insertInt(t, newtree, numElems)
+	return newtree, err
+}
 
+func search0(t *testing.T, newtree *BplusTree) {
 	// case 0. Look for a key which doesn't exist.
-	var testingKey TestingKey = 10000
+	var testingKey TestingKey = 10000000
 	ss := SearchSpecifier{searchKey: testingKey, direction: Exact}
 	result, err := newtree.Search(ss)
 	if err == nil {
@@ -159,12 +164,11 @@ func TestSearch0(t *testing.T) {
 		t.Errorf("Expected to not get any result but got: %v", result)
 		t.FailNow()
 	}
-
 }
 
-func TestSearch1(t *testing.T) {
+func search1(t *testing.T, newtree *BplusTree, numElems int) {
 	// case 1. Exact search.
-	var testingKey TestingKey = 100
+	testingKey := TestingKey(rand.Intn(numElems))
 	ss := SearchSpecifier{searchKey: testingKey, direction: Exact}
 	result, err := newtree.Search(ss)
 	if err != nil {
@@ -176,9 +180,16 @@ func TestSearch1(t *testing.T) {
 		t.FailNow()
 	}
 
+	expectedVal := int(testingKey) + 10
+	actualVal := result[0].(*TestingElem).val
+	if expectedVal != actualVal {
+		t.Errorf("Result doesn't match. expected: %d, got: %d",
+			expectedVal, actualVal)
+		t.FailNow()
+	}
 	// case 1.a Exact search. Provide an evaluator and maxElems which
 	// should be ignored.
-	var testingKey1 TestingKey = 100
+	testingKey1 := TestingKey(rand.Intn(numElems))
 	ss = SearchSpecifier{searchKey: testingKey1, direction: Exact,
 		maxElems: 50, evaluator: keyEvaluator}
 	result, err = newtree.Search(ss)
@@ -194,11 +205,18 @@ func TestSearch1(t *testing.T) {
 		t.Errorf("Got nil result")
 		t.FailNow()
 	}
+	expectedVal = int(testingKey1) + 10
+	actualVal = result[0].(*TestingElem).val
+	if expectedVal != actualVal {
+		t.Errorf("Result doesn't match. expected: %d, got: %d",
+			expectedVal, actualVal)
+		t.FailNow()
+	}
 }
 
-func TestSearch2(t *testing.T) {
+func search2(t *testing.T, newtree *BplusTree, numElems int) {
 	// case 2. maxElems greater than limit.
-	var testingKey TestingKey = 100
+	testingKey := TestingKey(rand.Intn(numElems))
 	ss := SearchSpecifier{searchKey: testingKey, direction: Exact,
 		maxElems: 100, evaluator: keyEvaluator}
 
@@ -213,9 +231,12 @@ func TestSearch2(t *testing.T) {
 	}
 }
 
-func TestSearch3(t *testing.T) {
+func search3(t *testing.T, newtree *BplusTree, numElems int) {
 	// case 3. maxElems = 10, in Right direction. nil evaluator
-	var testingKey TestingKey = 100
+	if numElems < 11 {
+		return
+	}
+	testingKey := TestingKey(rand.Intn(numElems - 11))
 	ss := SearchSpecifier{searchKey: testingKey, direction: Right,
 		maxElems: 10}
 
@@ -229,8 +250,9 @@ func TestSearch3(t *testing.T) {
 		t.FailNow()
 	}
 
-	if len(result) < ss.maxElems || len(result) > ss.maxElems+1 {
-		t.Errorf("Expected to find atleast %d results, got: %d", ss.maxElems, len(result))
+	if len(result) != ss.maxElems+1 {
+		t.Errorf("Expected to find atleast %d results, got: %d", ss.maxElems,
+			len(result))
 		t.FailNow()
 	}
 
@@ -248,9 +270,12 @@ func TestSearch3(t *testing.T) {
 	}
 }
 
-func TestSearch4(t *testing.T) {
+func search4(t *testing.T, newtree *BplusTree, numElems int) {
 	// case 4. maxElems = 10, in Left direction.
-	var testingKey TestingKey = 100
+	if numElems < 11 {
+		return
+	}
+	testingKey := TestingKey(rand.Intn(numElems-11) + 11)
 	ss := SearchSpecifier{searchKey: testingKey, direction: Left,
 		maxElems: 10}
 
@@ -283,9 +308,12 @@ func TestSearch4(t *testing.T) {
 	}
 }
 
-func TestSearch5(t *testing.T) {
+func search5(t *testing.T, newtree *BplusTree, numElems int) {
 	// case 5. maxElems = 10, in both directions.
-	var testingKey TestingKey = 100
+	if numElems < 40 {
+		return
+	}
+	testingKey := TestingKey(rand.Intn(numElems-40) + 20)
 	ss := SearchSpecifier{searchKey: testingKey, direction: Both,
 		maxElems: 20}
 
@@ -299,8 +327,9 @@ func TestSearch5(t *testing.T) {
 		t.FailNow()
 	}
 
-	if len(result) < ss.maxElems || len(result) > ss.maxElems+1 {
-		t.Errorf("Expected to find atleast %d results, got: %d", ss.maxElems, len(result))
+	if len(result) != ss.maxElems+1 {
+		t.Errorf("Expected to find atleast %d results, got: %d", ss.maxElems,
+			len(result))
 		t.FailNow()
 	}
 
@@ -319,13 +348,15 @@ func TestSearch5(t *testing.T) {
 	}
 }
 
-func TestSearch6(t *testing.T) {
+func search6(t *testing.T, newtree *BplusTree, numElems int) {
 
 	// case 6. use of evaluator with maxElems = 10, such that
 	// evaluator yields more than 10 elements. We should still
 	// get 10 elements.
-
-	var testingKey TestingKey = 100
+	if numElems < 21 {
+		return
+	}
+	testingKey := TestingKey(rand.Intn(numElems-21) + 10)
 	ss := SearchSpecifier{searchKey: testingKey, direction: Both,
 		maxElems: 10, evaluator: func(k1 Key, k2 Key) bool {
 			result := k1.Compare(k2)
@@ -347,8 +378,9 @@ func TestSearch6(t *testing.T) {
 		t.FailNow()
 	}
 
-	if len(result) < ss.maxElems || len(result) > ss.maxElems+1 {
-		t.Errorf("Expected to find atleast %d results, got: %d", ss.maxElems, len(result))
+	if len(result) != ss.maxElems+1 {
+		t.Errorf("Expected to find atleast %d results, got: %d", ss.maxElems,
+			len(result))
 		t.FailNow()
 	}
 
@@ -359,7 +391,8 @@ func TestSearch6(t *testing.T) {
 		//fmt.Println(reflect.TypeOf(result[i]))
 		actualVal := result[i].(*TestingElem).val
 		if actualVal != expectedVal {
-			t.Errorf("At index %d: expected: %d, got %v", i, expectedVal, actualVal)
+			t.Errorf("At index %d: expected: %d, got %v", i, expectedVal,
+				actualVal)
 			t.FailNow()
 		}
 		// and increment by 1.
@@ -367,13 +400,15 @@ func TestSearch6(t *testing.T) {
 	}
 }
 
-func TestSearch7(t *testing.T) {
+func search7(t *testing.T, newtree *BplusTree, numElems int) {
 
 	// case 7. use of evaluator with maxElems = 10, such that
 	// evaluator yields less than 10 elements. We should only
 	// get less than 10 elements.
-
-	var testingKey TestingKey = 100
+	if numElems < 40 {
+		return
+	}
+	testingKey := TestingKey(rand.Intn(numElems-40) + 20)
 	ss := SearchSpecifier{searchKey: testingKey, direction: Both,
 		maxElems: 10, evaluator: func(k1 Key, k2 Key) bool {
 			result := k1.Compare(k2)
@@ -407,7 +442,8 @@ func TestSearch7(t *testing.T) {
 		//fmt.Println(reflect.TypeOf(result[i]))
 		actualVal := result[i].(*TestingElem).val
 		if actualVal != expectedVal {
-			t.Errorf("At index %d: expected: %d, got %v", i, expectedVal, actualVal)
+			t.Errorf("At index %d: expected: %d, got %v", i, expectedVal,
+				actualVal)
 			t.FailNow()
 		}
 		// and increment by 1.
@@ -415,7 +451,22 @@ func TestSearch7(t *testing.T) {
 	}
 }
 
+func TestInsertAndSearch(t *testing.T) {
+	numElems, maxDegree := getNumElemsAndDegreeRandomly()
+	newtree, _ := initAndInsert(t, maxDegree, numElems)
+	search0(t, newtree)
+	search1(t, newtree, numElems)
+	search2(t, newtree, numElems)
+	search3(t, newtree, numElems)
+	search4(t, newtree, numElems)
+	search5(t, newtree, numElems)
+	search6(t, newtree, numElems)
+	search7(t, newtree, numElems)
+}
+
 func TestRemove1(t *testing.T) {
+	numElems, maxDegree := getNumElemsAndDegreeRandomly()
+	newtree, _ := initAndInsert(t, maxDegree, numElems)
 	fmt.Println("Starting remove in order tests")
 	for i := 0; i < numElems; i++ {
 		key := TestingKey(i)
@@ -426,10 +477,19 @@ func TestRemove1(t *testing.T) {
 			t.FailNow()
 		}
 	}
+	// lookup something now and ensures there's nothing.
+	testingKey := TestingKey(rand.Intn(numElems))
+	ss := SearchSpecifier{searchKey: testingKey, direction: Exact}
+	result, err := newtree.Search(ss)
+	if err != ErrNotFound || result != nil {
+		t.Errorf("Expected to not find the key: %v", ss.searchKey)
+		t.FailNow()
+	}
 }
 
 func TestRemove2(t *testing.T) {
-	TestInsert(t)
+	numElems, maxDegree := getNumElemsAndDegreeRandomly()
+	newtree, _ := initAndInsert(t, maxDegree, numElems)
 	fmt.Println("Starting remove in reverse order tests")
 	for i := numElems - 1; i >= 0; i-- {
 		key := TestingKey(i)
@@ -440,10 +500,19 @@ func TestRemove2(t *testing.T) {
 			t.FailNow()
 		}
 	}
+	// lookup something now and ensures there's nothing.
+	testingKey := TestingKey(rand.Intn(numElems))
+	ss := SearchSpecifier{searchKey: testingKey, direction: Exact}
+	result, err := newtree.Search(ss)
+	if err != ErrNotFound || result != nil {
+		t.Errorf("Expected to not find the key: %v", ss.searchKey)
+		t.FailNow()
+	}
 }
 
 func TestRemove3(t *testing.T) {
-	TestInsert(t)
+	numElems, maxDegree := getNumElemsAndDegreeRandomly()
+	newtree, _ := initAndInsert(t, maxDegree, numElems)
 	fmt.Println("Starting remove in weird order test")
 
 	removed := make(map[int]bool)
@@ -457,6 +526,23 @@ func TestRemove3(t *testing.T) {
 			t.FailNow()
 		}
 		removed[k1] = true
+
+		sKey := rand.Intn(numElems)
+		res, serr := newtree.Search(SearchSpecifier{searchKey: TestingKey(sKey),
+			direction: Exact})
+		if removed[sKey] == true {
+			// expect failure
+			if serr != ErrNotFound {
+				t.Errorf("Expected %v to be not found (res: %v)", sKey, res)
+				t.FailNow()
+			}
+		} else {
+			// expect success.
+			if err != nil {
+				t.Errorf("Expected %v to be found", sKey)
+				t.FailNow()
+			}
+		}
 
 		k2 := numElems/3 + i
 		key = TestingKey(k2)
@@ -484,9 +570,19 @@ func TestRemove3(t *testing.T) {
 			newtree.Remove(TestingKey(i))
 		}
 	}
+	// lookup something now and ensures there's nothing.
+	testingKey := TestingKey(rand.Intn(numElems))
+	ss := SearchSpecifier{searchKey: testingKey, direction: Exact}
+	result, err := newtree.Search(ss)
+	if err != ErrNotFound || result != nil {
+		t.Errorf("Expected to not find the key: %v", ss.searchKey)
+		t.FailNow()
+	}
+
 }
 
-func RemoveRoutine(t *testing.T, k int, errors []error, index int, wg *sync.WaitGroup) {
+func RemoveRoutine(t *testing.T, newtree *BplusTree, k int, errors []error, index int,
+	wg *sync.WaitGroup) {
 	defer wg.Done()
 	t.Logf("Removing: %v", k)
 	err := newtree.Remove(TestingKey(k))
@@ -495,14 +591,15 @@ func RemoveRoutine(t *testing.T, k int, errors []error, index int, wg *sync.Wait
 }
 
 func TestRemove4(t *testing.T) {
-	TestInsert(t)
+	numElems, maxDegree := getNumElemsAndDegreeRandomly()
+	newtree, _ := initAndInsert(t, maxDegree, numElems)
 	fmt.Println("Starting remove in parallel test")
 	errors := make([]error, numElems)
 	var wg sync.WaitGroup
 
 	for i := 0; i < numElems; i++ {
 		wg.Add(1)
-		go RemoveRoutine(t, i, errors, i, &wg)
+		go RemoveRoutine(t, newtree, i, errors, i, &wg)
 	}
 
 	wg.Wait()
@@ -514,25 +611,31 @@ func TestRemove4(t *testing.T) {
 	}
 	t.Logf("\nFinal tree:\n")
 	newtree.Print()
-}
-
-func TestInitStr(t *testing.T) {
-	ctx := Context{lockMgr: nil, maxDegree: maxDegree}
-	var err error
-	// Enable line numbers in logging
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
-	newtree, err = NewBplusTree(ctx)
-	if err != nil {
-		t.Errorf("Failed to create new bplustree: %v", err)
+	// lookup something now and ensures there's nothing.
+	testingKey := TestingKey(rand.Intn(numElems))
+	ss := SearchSpecifier{searchKey: testingKey, direction: Exact}
+	result, err := newtree.Search(ss)
+	if err != ErrNotFound || result != nil {
+		t.Errorf("Expected to not find the key: %v", ss.searchKey)
 		t.FailNow()
 	}
 }
 
-func InsertRoutineStr(t *testing.T,
-	elem *TestingElemStr,
-	errors []error,
-	index int,
-	wg *sync.WaitGroup) {
+func initTreeStr(t *testing.T, maxDegree int) (*BplusTree, error) {
+	ctx := Context{lockMgr: nil, maxDegree: maxDegree}
+	var err error
+	// Enable line numbers in logging
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
+	newtree, err := NewBplusTree(ctx)
+	if err != nil {
+		t.Errorf("Failed to create new bplustree: %v", err)
+		t.FailNow()
+	}
+	return newtree, err
+}
+
+func insertRoutineStr(t *testing.T, newtree *BplusTree, elem *TestingElemStr,
+	errors []error, index int, wg *sync.WaitGroup) {
 	defer wg.Done()
 	t.Logf("Inserting: %v", elem)
 	err := newtree.Insert(elem)
@@ -545,7 +648,7 @@ func makeTestingKeyStr(k int) TestingKeyStr {
 	return TestingKeyStr(fmt.Sprintf("key_%d", k))
 }
 
-func TestInsertStr(t *testing.T) {
+func insertIntStr(t *testing.T, newtree *BplusTree, numElems int) {
 	t.Log("Starting insert test..")
 	elems := make([]TestingElemStr, numElems)
 	errors := make([]error, numElems)
@@ -556,7 +659,7 @@ func TestInsertStr(t *testing.T) {
 		elem.key = makeTestingKeyStr(i)
 		elem.val = i + 10
 		wg.Add(1)
-		go InsertRoutineStr(t, elem, errors, i, &wg)
+		go insertRoutineStr(t, newtree, elem, errors, i, &wg)
 	}
 
 	wg.Wait()
@@ -570,11 +673,17 @@ func TestInsertStr(t *testing.T) {
 	newtree.Print()
 }
 
-func TestSearchStr0(t *testing.T) {
+func initAndInsertStr(t *testing.T, maxDegree int, numElems int) (*BplusTree, error) {
+	newtree, err := initTreeStr(t, maxDegree)
+	insertIntStr(t, newtree, numElems)
+	return newtree, err
+}
+
+func searchStr0(t *testing.T, newtree *BplusTree) {
 	t.Log("Starting search tests..")
 
 	// case 0. Look for a key which doesn't exist.
-	testingKey := makeTestingKeyStr(10000)
+	testingKey := makeTestingKeyStr(1000000)
 	ss := SearchSpecifier{searchKey: testingKey, direction: Exact}
 	result, err := newtree.Search(ss)
 	if err == nil {
@@ -596,9 +705,9 @@ func keyEvaluatorStr(k1 Key, k2 Key) bool {
 
 	return false
 }
-func TestSearchStr1(t *testing.T) {
+func searchStr1(t *testing.T, newtree *BplusTree, numElems int) {
 	// case 1. Exact search.
-	testingKey := makeTestingKeyStr(100)
+	testingKey := makeTestingKeyStr(rand.Intn(numElems))
 	ss := SearchSpecifier{searchKey: testingKey, direction: Exact}
 	result, err := newtree.Search(ss)
 	if err != nil {
@@ -609,10 +718,17 @@ func TestSearchStr1(t *testing.T) {
 		t.Errorf("Got nil result")
 		t.FailNow()
 	}
+	expectedVal := int(strHash(testingKey)) + 10
+	actualVal := result[0].(*TestingElemStr).val
+	if expectedVal != actualVal {
+		t.Errorf("Result doesn't match. expected: %d, got: %d",
+			expectedVal, actualVal)
+		t.FailNow()
+	}
 
 	// case 1.a Exact search. Provide an evaluator and maxElems which
 	// should be ignored.
-	testingKey1 := makeTestingKeyStr(100)
+	testingKey1 := makeTestingKeyStr(rand.Intn(numElems))
 	ss = SearchSpecifier{searchKey: testingKey1, direction: Exact,
 		maxElems: 50, evaluator: keyEvaluatorStr}
 	result, err = newtree.Search(ss)
@@ -628,11 +744,18 @@ func TestSearchStr1(t *testing.T) {
 		t.Errorf("Got nil result")
 		t.FailNow()
 	}
+	expectedVal = int(strHash(testingKey1)) + 10
+	actualVal = result[0].(*TestingElemStr).val
+	if expectedVal != actualVal {
+		t.Errorf("Result doesn't match. expected: %d, got: %d",
+			expectedVal, actualVal)
+		t.FailNow()
+	}
 }
 
-func TestSearchStr2(t *testing.T) {
+func searchStr2(t *testing.T, newtree *BplusTree, numElems int) {
 	// case 2. maxElems greater than limit.
-	testingKey := makeTestingKeyStr(100)
+	testingKey := makeTestingKeyStr(rand.Intn(numElems))
 	ss := SearchSpecifier{searchKey: testingKey, direction: Exact,
 		maxElems: 100, evaluator: keyEvaluatorStr}
 
@@ -647,9 +770,12 @@ func TestSearchStr2(t *testing.T) {
 	}
 }
 
-func TestSearchStr3(t *testing.T) {
+func searchStr3(t *testing.T, newtree *BplusTree, numElems int) {
 	// case 3. maxElems = 10, in Right direction. nil evaluator
-	testingKey := makeTestingKeyStr(100)
+	if numElems < 11 {
+		return
+	}
+	testingKey := makeTestingKeyStr(rand.Intn(numElems - 11))
 	ss := SearchSpecifier{searchKey: testingKey, direction: Right,
 		maxElems: 10}
 
@@ -663,7 +789,7 @@ func TestSearchStr3(t *testing.T) {
 		t.FailNow()
 	}
 
-	if len(result) < ss.maxElems || len(result) > ss.maxElems+1 {
+	if len(result) != ss.maxElems+1 {
 		t.Errorf("Expected to find atleast %d results, got: %d", ss.maxElems, len(result))
 		t.FailNow()
 	}
@@ -682,9 +808,12 @@ func TestSearchStr3(t *testing.T) {
 	}
 }
 
-func TestSearchStr4(t *testing.T) {
+func searchStr4(t *testing.T, newtree *BplusTree, numElems int) {
 	// case 4. maxElems = 10, in Left direction.
-	testingKey := makeTestingKeyStr(100)
+	if numElems < 11 {
+		return
+	}
+	testingKey := makeTestingKeyStr(rand.Intn(numElems-11) + 11)
 	ss := SearchSpecifier{searchKey: testingKey, direction: Left,
 		maxElems: 10}
 
@@ -698,8 +827,9 @@ func TestSearchStr4(t *testing.T) {
 		t.FailNow()
 	}
 
-	if len(result) < ss.maxElems || len(result) > ss.maxElems+1 {
-		t.Errorf("Expected to find atleast %d results, got: %d", ss.maxElems, len(result))
+	if len(result) != ss.maxElems+1 {
+		t.Errorf("Expected to find atleast %d results, got: %d", ss.maxElems,
+			len(result))
 		t.FailNow()
 	}
 
@@ -709,7 +839,8 @@ func TestSearchStr4(t *testing.T) {
 		//fmt.Println(reflect.TypeOf(result[i]))
 		actualVal := result[i].(*TestingElemStr).val
 		if actualVal != expectedVal {
-			t.Errorf("At index %d: expected: %d, got %v", i, expectedVal, actualVal)
+			t.Errorf("At index %d: expected: %d, got %v", i, expectedVal,
+				actualVal)
 			t.FailNow()
 		}
 		// and decrement by 1.
@@ -717,9 +848,12 @@ func TestSearchStr4(t *testing.T) {
 	}
 }
 
-func TestSearchStr5(t *testing.T) {
+func searchStr5(t *testing.T, newtree *BplusTree, numElems int) {
 	// case 5. maxElems = 10, in both directions.
-	testingKey := makeTestingKeyStr(100)
+	if numElems < 41 {
+		return
+	}
+	testingKey := makeTestingKeyStr(rand.Intn(numElems-41) + 20)
 	ss := SearchSpecifier{searchKey: testingKey, direction: Both,
 		maxElems: 20}
 
@@ -733,8 +867,9 @@ func TestSearchStr5(t *testing.T) {
 		t.FailNow()
 	}
 
-	if len(result) < ss.maxElems || len(result) > ss.maxElems+1 {
-		t.Errorf("Expected to find atleast %d results, got: %d", ss.maxElems, len(result))
+	if len(result) != ss.maxElems+1 {
+		t.Errorf("Expected to find atleast %d results, got: %d", ss.maxElems,
+			len(result))
 		t.FailNow()
 	}
 
@@ -745,7 +880,8 @@ func TestSearchStr5(t *testing.T) {
 		//fmt.Println(reflect.TypeOf(result[i]))
 		actualVal := result[i].(*TestingElemStr).val
 		if actualVal != expectedVal {
-			t.Errorf("At index %d: expected: %d, got %v", i, expectedVal, actualVal)
+			t.Errorf("At index %d: expected: %d, got %v", i, expectedVal,
+				actualVal)
 			t.FailNow()
 		}
 		// and increment by 1.
@@ -753,13 +889,15 @@ func TestSearchStr5(t *testing.T) {
 	}
 }
 
-func TestSearchStr6(t *testing.T) {
+func searchStr6(t *testing.T, newtree *BplusTree, numElems int) {
 
 	// case 6. use of evaluator with maxElems = 10, such that
 	// evaluator yields more than 10 elements. We should still
 	// get 10 elements.
-
-	testingKey := makeTestingKeyStr(100)
+	if numElems < 41 {
+		return
+	}
+	testingKey := makeTestingKeyStr(rand.Intn(numElems-41) + 20)
 	ss := SearchSpecifier{searchKey: testingKey, direction: Both,
 		maxElems: 10, evaluator: func(k1 Key, k2 Key) bool {
 			result := k1.Compare(k2)
@@ -781,8 +919,9 @@ func TestSearchStr6(t *testing.T) {
 		t.FailNow()
 	}
 
-	if len(result) < ss.maxElems || len(result) > ss.maxElems+1 {
-		t.Errorf("Expected to find atleast %d results, got: %d", ss.maxElems, len(result))
+	if len(result) != ss.maxElems+1 {
+		t.Errorf("Expected to find atleast %d results, got: %d", ss.maxElems,
+			len(result))
 		t.FailNow()
 	}
 
@@ -793,7 +932,8 @@ func TestSearchStr6(t *testing.T) {
 		//fmt.Println(reflect.TypeOf(result[i]))
 		actualVal := result[i].(*TestingElemStr).val
 		if actualVal != expectedVal {
-			t.Errorf("At index %d: expected: %d, got %v", i, expectedVal, actualVal)
+			t.Errorf("At index %d: expected: %d, got %v", i, expectedVal,
+				actualVal)
 			t.FailNow()
 		}
 		// and increment by 1.
@@ -801,13 +941,15 @@ func TestSearchStr6(t *testing.T) {
 	}
 }
 
-func TestSearchStr7(t *testing.T) {
+func searchStr7(t *testing.T, newtree *BplusTree, numElems int) {
 
 	// case 7. use of evaluator with maxElems = 10, such that
 	// evaluator yields less than 10 elements. We should only
 	// get less than 10 elements.
-
-	testingKey := makeTestingKeyStr(100)
+	if numElems < 41 {
+		return
+	}
+	testingKey := makeTestingKeyStr(rand.Intn(numElems-41) + 20)
 	ss := SearchSpecifier{searchKey: testingKey, direction: Both,
 		maxElems: 10, evaluator: func(k1 Key, k2 Key) bool {
 			result := k1.Compare(k2)
@@ -849,7 +991,22 @@ func TestSearchStr7(t *testing.T) {
 	}
 }
 
+func TestInsertAndSearchStr(t *testing.T) {
+	numElems, maxDegree := getNumElemsAndDegreeRandomly()
+	newtree, _ := initAndInsertStr(t, maxDegree, numElems)
+	searchStr0(t, newtree)
+	searchStr1(t, newtree, numElems)
+	searchStr2(t, newtree, numElems)
+	searchStr3(t, newtree, numElems)
+	searchStr4(t, newtree, numElems)
+	searchStr5(t, newtree, numElems)
+	searchStr6(t, newtree, numElems)
+	searchStr7(t, newtree, numElems)
+}
+
 func TestRemoveStr1(t *testing.T) {
+	numElems, maxDegree := getNumElemsAndDegreeRandomly()
+	newtree, _ := initAndInsertStr(t, maxDegree, numElems)
 	fmt.Println("Starting remove in order tests")
 	for i := 0; i < numElems; i++ {
 		key := makeTestingKeyStr(i)
@@ -860,10 +1017,20 @@ func TestRemoveStr1(t *testing.T) {
 			t.FailNow()
 		}
 	}
+
+	// lookup something now and ensures there's nothing.
+	testingKey := makeTestingKeyStr(rand.Intn(numElems))
+	ss := SearchSpecifier{searchKey: testingKey, direction: Exact}
+	result, err := newtree.Search(ss)
+	if err != ErrNotFound || result != nil {
+		t.Errorf("Expected to not find the key: %v", ss.searchKey)
+		t.FailNow()
+	}
 }
 
 func TestRemoveStr2(t *testing.T) {
-	TestInsertStr(t)
+	numElems, maxDegree := getNumElemsAndDegreeRandomly()
+	newtree, _ := initAndInsertStr(t, maxDegree, numElems)
 	fmt.Println("Starting remove in reverse order tests")
 	for i := numElems - 1; i >= 0; i-- {
 		key := makeTestingKeyStr(i)
@@ -874,40 +1041,71 @@ func TestRemoveStr2(t *testing.T) {
 			t.FailNow()
 		}
 	}
+	// lookup something now and ensures there's nothing.
+	testingKey := makeTestingKeyStr(rand.Intn(numElems))
+	ss := SearchSpecifier{searchKey: testingKey, direction: Exact}
+	result, err := newtree.Search(ss)
+	if err != ErrNotFound || result != nil {
+		t.Errorf("Expected to not find the key: %v", ss.searchKey)
+		t.FailNow()
+	}
 }
 
 func TestRemoveStr3(t *testing.T) {
-	TestInsertStr(t)
+	numElems, maxDegree := getNumElemsAndDegreeRandomly()
+	newtree, _ := initAndInsertStr(t, maxDegree, numElems)
 	fmt.Println("Starting remove in weird order test")
 
 	removed := make(map[int]bool)
 	for i := 0; i < numElems/3; i++ {
 		k1 := i
 		key := makeTestingKeyStr(k1)
-		fmt.Printf("removing key: %v", key)
+		fmt.Printf("1. Removing key: %v\n", key)
 		err := newtree.Remove(key)
 		if err != nil {
 			t.Errorf("Failed to remove key: %v got %v", key, err)
+			fmt.Printf("removed so far: %v\n", removed)
 			t.FailNow()
 		}
 		removed[k1] = true
 
 		k2 := numElems/3 + i
 		key = makeTestingKeyStr(k2)
-		fmt.Printf("removing key: %v", key)
+		fmt.Printf("2. Removing key: %v\n", key)
 		err = newtree.Remove(key)
 		if err != nil {
 			t.Errorf("Failed to remove key: %v got %v", key, err)
+			fmt.Printf("removed so far: %v", removed)
 			t.FailNow()
 		}
 		removed[k2] = true
 
-		k3 := numElems*2/3 + i
+		sKey := makeTestingKeyStr(rand.Intn(numElems))
+		intval := strHash(sKey)
+		res, serr := newtree.Search(SearchSpecifier{searchKey: sKey,
+			direction: Exact})
+
+		if removed[intval] == true {
+			// expect failure
+			if serr != ErrNotFound {
+				t.Errorf("Expected %v to be not found (res: %v)", sKey, res)
+				t.FailNow()
+			}
+		} else {
+			// expect success.
+			if err != nil {
+				t.Errorf("Expected %v to be found\n", sKey)
+				t.FailNow()
+			}
+		}
+
+		k3 := numElems - 1 - i
 		key = makeTestingKeyStr(k3)
-		fmt.Printf("removing key: %v", key)
+		fmt.Printf("3. Removing key: %v\n", key)
 		err = newtree.Remove(key)
 		if err != nil {
 			t.Errorf("Failed to remove key: %v got %v", key, err)
+			fmt.Printf("removed so far: %v\n", removed)
 			t.FailNow()
 		}
 		removed[k3] = true
@@ -918,25 +1116,81 @@ func TestRemoveStr3(t *testing.T) {
 			newtree.Remove(makeTestingKeyStr(i))
 		}
 	}
+	// lookup something now and ensures there's nothing.
+	testingKey := makeTestingKeyStr(rand.Intn(numElems))
+	ss := SearchSpecifier{searchKey: testingKey, direction: Exact}
+	result, err := newtree.Search(ss)
+	if err != ErrNotFound || result != nil {
+		t.Errorf("Expected to not find the key: %v", ss.searchKey)
+		t.FailNow()
+	}
 }
 
-func RemoveRoutineStr(t *testing.T, k int, errors []error, index int, wg *sync.WaitGroup) {
+func removeRoutineStr(t *testing.T, newtree *BplusTree, k int, errors []error,
+	index int, wg *sync.WaitGroup, mux *sync.RWMutex, removed *map[int]bool) {
 	defer wg.Done()
 	t.Logf("Removing: %v", k)
+	mux.Lock()
 	err := newtree.Remove(makeTestingKeyStr(k))
+	(*removed)[k] = true
+	mux.Unlock()
 	errors[index] = err
 	t.Logf("++++++++++++++++++++++++++++++++")
 }
 
+func searchRoutineStr(t *testing.T, newtree *BplusTree, numElems int,
+	wg *sync.WaitGroup, mux *sync.RWMutex, removed *map[int]bool) {
+
+	defer wg.Done()
+	for i := 0; i < numElems; i++ {
+		mux.Lock()
+		k := rand.Intn(numElems)
+		fmt.Printf("Searching: %v\n", k)
+		testingKey := makeTestingKeyStr(k)
+		ss := SearchSpecifier{searchKey: testingKey, direction: Exact}
+		result, err := newtree.Search(ss)
+		if (*removed)[k] {
+			if err != ErrNotFound || result != nil {
+				t.Errorf("Expected to not find the key: %v", ss.searchKey)
+				t.FailNow()
+			}
+		}
+		if !(*removed)[k] {
+			if err != nil || result == nil {
+				t.Errorf("Expected to find the key: %v, but encountered err: %v\n",
+					ss.searchKey, err)
+				t.FailNow()
+			}
+
+			expectedVal := k + 10
+			actualVal := result[0].(*TestingElemStr).val
+			if actualVal != expectedVal {
+				t.Errorf("Expected %d, got %d for key: %v", expectedVal, actualVal,
+					ss.searchKey)
+				t.FailNow()
+			}
+		}
+		mux.Unlock()
+		t.Logf("++++++++++++++++++++++++++++++++")
+	}
+}
+
 func TestRemoveStr4(t *testing.T) {
-	TestInsertStr(t)
+	numElems, maxDegree := getNumElemsAndDegreeRandomly()
+	newtree, _ := initAndInsertStr(t, maxDegree, numElems)
 	fmt.Println("Starting remove in parallel test")
 	errors := make([]error, numElems)
-	var wg sync.WaitGroup
+	var wg, wgSearch sync.WaitGroup
+
+	removed := make(map[int]bool)
+	var mux sync.RWMutex
+
+	wgSearch.Add(1)
+	go searchRoutineStr(t, newtree, numElems, &wgSearch, &mux, &removed)
 
 	for i := 0; i < numElems; i++ {
 		wg.Add(1)
-		go RemoveRoutineStr(t, i, errors, i, &wg)
+		go removeRoutineStr(t, newtree, i, errors, i, &wg, &mux, &removed)
 	}
 
 	wg.Wait()
@@ -946,6 +1200,17 @@ func TestRemoveStr4(t *testing.T) {
 			t.FailNow()
 		}
 	}
+	wgSearch.Wait()
+
 	t.Logf("\nFinal tree:\n")
 	newtree.Print()
+	// lookup something now and ensures there's nothing.
+	testingKey := makeTestingKeyStr(rand.Intn(numElems))
+	ss := SearchSpecifier{searchKey: testingKey, direction: Exact}
+	result, err := newtree.Search(ss)
+	if err != ErrNotFound || result != nil {
+		t.Errorf("Expected to not find the key: %v, err: %v, result: %v",
+			ss.searchKey, err, result)
+		t.FailNow()
+	}
 }
