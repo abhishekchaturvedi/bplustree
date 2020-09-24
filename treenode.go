@@ -74,6 +74,6 @@ func (node *treeNode) String() string {
 		nextKey = "nil"
 	}
 
-	return fmt.Sprintf("{%p [children: %v, prev: %v, next: %v, leaf: %v]}",
-		node, node.children, prevKey, nextKey, node.isLeaf)
+	return fmt.Sprintf("{%p [children (len:%d): %v, prev: %v, next: %v, leaf: %v]}",
+		node, len(node.children), node.children, prevKey, nextKey, node.isLeaf)
 }
