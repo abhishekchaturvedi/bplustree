@@ -1,0 +1,59 @@
+Atomicity issue with the persistent bplustree.
+
+Problem: 
+When a key is inserted into the tree, that results in upto N new nodes creation
+and updating N-1 existing nodes (for a tree of height N at a given time). 
+Typically the insert would involve following steps and there is failure 
+possibility in each of those steps:
+1. Lookup of nodes on the path to the leaf node. Each node fetch, if not in 
+memory, can result in failure in fetching from DB.
+2. Updating the leaf node to insert new dataKey/Value. No failure possible here.
+3. Rebalancing every node on the path which involves updating the nodes on the 
+path and creating N new nodes. Each of these updates may require fetching the 
+node from DB which could result into failure 
+4. Even if 1 and 2 succeed, finally when each of the new (upto) 2N+1 nodes 
+needs to be updated in DB, that can result in failure.
+
+We need to make sure that irrespective of which step the failure happens we 
+leave the tree in a fully traversable and consistent state. Similar 
+considerations are to be done for Remove operation as well. 
+
+Solution:
+To solve this, at a high level, let us maintain a deep-copy of each of the 
+nodes prior to any update which happens in steps 2 and 3 in the insert operation
+(similar in remove op as well). Call this “origList”. Let us also maintain a 
+‘newList’ which will contain all the new nodes that have to be added both in
+the memory manager as well as the DB, and “updateList” which contains all the 
+nodes which have been changed/updated (new child added/removed/dataKey updated 
+etc.). Note that the updateList will contain the node/keys which already exist
+in memory manager and the DB (no new node key here). 
+Now, let’s consider each of the steps above individually.
+1. If any of the lookup fails, we will fail the request -- no updates to 
+in-memory nodes or DB made at this point.
+2. When a new key is inserted to a leaf node, we start maintaining the deep 
+copy of the node content pre-update. 
+3. At each level, as we rebalance, we are potentially updating curr, creating 
+a new sibling, and updating the parent. 
+    - Add curr, and parent to origList before updating these. 
+    - Updating a parent may require accessing a child in certain cases, which 
+      may not be in memory and fetch from db may fail. So, if this update fails,
+      we will fail the operation. And before returning, we will roll back by
+      going over the ‘origList’ and updating the memory manager with each node
+      in that list. Note that inserting in memory manager can’t fail, so the 
+      roll back will be successful. Since no new nodes are yet added to the 
+      memory manager and/or DB has not been updated, nothing else is needed.
+4. If all ops went through and insert/remove is successful upto the root node, 
+then we will update the DB for all node keys which are in newList and updateList
+atomically (will cover the atomicity of DB update separately -- need to 
+understand if ADB provides any primitives). 
+    - If an update to DB failed, that means that no keys are written to the DB.
+      We need to rollback the entire op/path. For this we go through the 
+      ‘origList’ and insert each of the nodes back in the memoryMgr in effect 
+      overwriting the update made. Note that this operation can’t fail. And 
+      just discard the 'updateList' and 'newList'. 
+    - If the DB update succeeded, then we insert all keys in newList to 
+      memory manager.
+
+
+Atomic update to ADB: TODO
+
